@@ -71,6 +71,14 @@ class FlexivControlNode(Node):
         self.declare_parameter("safety_profile", "tabletop_safe")
         self.declare_parameter("state_rate", 50.0)
         self.declare_parameter("joint_names", [""])
+        # ~/delta_twist_cmds semantics. "unitless" matches a MoveIt-Servo-style
+        # joystick pipeline (values in [-1, 1] scaled by twist_scale_*, the
+        # same convention as flexiv_ros2's Servo config); "speed_units" treats
+        # the twist directly as m/s and rad/s.
+        self.declare_parameter("twist_in_type", "unitless")
+        self.declare_parameter("twist_scale_linear", 0.4)     # m/s at full deflection
+        self.declare_parameter("twist_scale_rotational", 0.8) # rad/s at full deflection
+        self.declare_parameter("twist_max_age", 0.25)         # s; 0 disables the check
 
         backend = self.get_parameter("backend").value
         serial = self.get_parameter("robot_serial").value
@@ -122,6 +130,13 @@ class FlexivControlNode(Node):
             cancel_callback=lambda _g: CancelResponse.ACCEPT,
             callback_group=cb,
         )
+        self.twist_in_type = str(self.get_parameter("twist_in_type").value)
+        if self.twist_in_type not in ("unitless", "speed_units"):
+            raise ValueError(f"twist_in_type must be 'unitless' or 'speed_units', got {self.twist_in_type!r}")
+        self.twist_scale_linear = float(self.get_parameter("twist_scale_linear").value)
+        self.twist_scale_rotational = float(self.get_parameter("twist_scale_rotational").value)
+        self.twist_max_age = float(self.get_parameter("twist_max_age").value)
+
         self.get_logger().info("flexiv_control bridge ready")
 
     # -- publishers ----------------------------------------------------------
@@ -152,11 +167,29 @@ class FlexivControlNode(Node):
 
     # -- jog (MoveIt-Servo-compatible) --------------------------------------
     def _on_twist(self, msg: TwistStamped) -> None:
-        # Treat the twist as a per-tick velocity; integrate over one control dt.
-        dt = self.robot.dt
+        # Drop stale commands: replaying an old twist after a hiccup would jerk
+        # the arm. A zero stamp is allowed (some publishers do not stamp).
+        if self.twist_max_age > 0.0 and (msg.header.stamp.sec or msg.header.stamp.nanosec):
+            age = (self.get_clock().now() - rclpy.time.Time.from_msg(msg.header.stamp)).nanoseconds * 1e-9
+            if age > self.twist_max_age:
+                self.get_logger().warn(
+                    f"Ignoring stale twist command ({age:.2f}s old)", throttle_duration_sec=2.0
+                )
+                return
+
         lin = msg.twist.linear
         ang = msg.twist.angular
-        delta = [lin.x * dt, lin.y * dt, lin.z * dt, ang.x * dt, ang.y * dt, ang.z * dt]
+        v = [lin.x, lin.y, lin.z, ang.x, ang.y, ang.z]
+        if self.twist_in_type == "unitless":
+            # Joystick convention: clip to [-1, 1], then scale to real speeds.
+            v = [max(-1.0, min(1.0, x)) for x in v]
+            v = [x * self.twist_scale_linear for x in v[:3]] + [
+                x * self.twist_scale_rotational for x in v[3:]
+            ]
+
+        # Integrate the velocity over one control dt to get a per-tick delta.
+        dt = self.robot.dt
+        delta = [x * dt for x in v]
         if any(abs(d) > 1e-9 for d in delta):
             try:
                 self.robot.servo_cartesian_delta(delta, duration=dt)

@@ -24,7 +24,7 @@ Quick start (no hardware needed)::
 
 from __future__ import annotations
 
-__version__ = "0.1.8"
+__version__ = "0.2.0"
 
 # --- core data types
 from .types import (  # noqa: F401

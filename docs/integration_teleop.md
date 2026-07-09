@@ -100,6 +100,16 @@ ROS-native teleop stack and you do not need to replace it.
   repo and your RL/MPC code share one controller and one safety profile instead
   of two parallel control paths.
 
+  Mind the **unit semantics** when you rewire: a MoveIt-Servo-style joystick
+  pipeline publishes *unitless* values in `[-1, 1]` that Servo scales to real
+  speeds. The bringup node's default (`twist_in_type: unitless`,
+  `twist_scale_linear: 0.4` m/s, `twist_scale_rotational: 0.8` rad/s) matches
+  the flexiv_ros2 Servo config, so the same command stream moves at the same
+  speed. If your publisher sends real m/s / rad/s instead, set
+  `twist_in_type: speed_units`. Stale commands older than `twist_max_age`
+  (default 0.25 s) are dropped. Re-verify speeds on the real arm after any
+  rewiring.
+
 Either way, the win is a single execution-and-safety layer underneath teleop,
 RL, MPC, and a high-level planner — not three different ways to command the same arm.
 

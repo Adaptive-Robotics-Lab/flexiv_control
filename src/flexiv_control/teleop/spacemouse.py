@@ -118,6 +118,10 @@ class SpaceMouseTeleop:
         deadband: float = 0.05,
         deadman_button: Optional[int] = 0,
         gripper_button: int = 1,
+        gripper_open_width: float = 0.09,
+        gripper_close_width: float = 0.01,
+        initial_open: bool = False,
+        signs: Optional[List[float]] = None,
         frame: str = "base",
         owner: str = "spacemouse",
     ):
@@ -132,7 +136,15 @@ class SpaceMouseTeleop:
         self.gripper_button = gripper_button
         self.frame = frame
         self.owner = owner
-        self._gripper_open = True
+        self.gripper_open_width = float(gripper_open_width)
+        self.gripper_close_width = float(gripper_close_width)
+        # Matches the ROS teleop bridge convention: assume closed at start so
+        # the FIRST gripper-button press opens.
+        self._gripper_open = bool(initial_open)
+        # Optional per-axis sign flips [x, y, z, rx, ry, rz] so the device's
+        # axes can be calibrated to the robot frame (all +1 by default).
+        self.signs = np.ones(6) if signs is None else np.asarray(signs, float).reshape(6)
+        self._prev_gripper_button = 0
 
     # -- mapping -------------------------------------------------------------
     def to_delta(self, st: SpaceMouseState) -> np.ndarray:
@@ -141,8 +153,8 @@ class SpaceMouseTeleop:
         trans = self._apply_deadband(st.translation)
         rot = self._apply_deadband(st.rotation)
         delta = np.empty(6)
-        delta[:3] = trans * self.pos_scale * self.dt
-        delta[3:] = rot * self.rot_scale * self.dt
+        delta[:3] = trans * self.signs[:3] * self.pos_scale * self.dt
+        delta[3:] = rot * self.signs[3:] * self.rot_scale * self.dt
         return delta
 
     def _apply_deadband(self, v: np.ndarray) -> np.ndarray:
@@ -160,11 +172,21 @@ class SpaceMouseTeleop:
         )
 
     def _gripper_from_buttons(self, st: SpaceMouseState) -> Optional[GripperCommand]:
-        if len(st.buttons) > self.gripper_button and st.buttons[self.gripper_button]:
-            self._gripper_open = not self._gripper_open
-            width = 0.08 if self._gripper_open else 0.0
-            return GripperCommand(width=width, force=20.0, grasp=not self._gripper_open)
-        return None
+        """Toggle on the button's RISING EDGE only.
+
+        A held button lasts many control ticks; toggling on level would flip
+        the gripper open/closed at the loop rate for as long as it is pressed.
+        """
+        pressed = int(
+            len(st.buttons) > self.gripper_button and bool(st.buttons[self.gripper_button])
+        )
+        rising = pressed == 1 and self._prev_gripper_button == 0
+        self._prev_gripper_button = pressed
+        if not rising:
+            return None
+        self._gripper_open = not self._gripper_open
+        width = self.gripper_open_width if self._gripper_open else self.gripper_close_width
+        return GripperCommand(width=width, force=20.0, grasp=not self._gripper_open)
 
     # -- RL intervention (SERL / HIL-SERL pattern) ---------------------------
     def intervention(self, policy_action: np.ndarray) -> Tuple[np.ndarray, bool]:
@@ -176,6 +198,7 @@ class SpaceMouseTeleop:
         the human took over (so the RL loop can label the transition).
         """
         st = self.source.read()
+        self._gripper_from_buttons(st)  # keep the toggle state fresh
         moving = st.magnitude() > self.deadband and self._deadman_ok(st)
         if not moving:
             return np.asarray(policy_action, float).reshape(7), False
@@ -201,9 +224,11 @@ class SpaceMouseTeleop:
                 if max_ticks is not None and ticks >= max_ticks:
                     break
                 st = self.source.read()
+                # Track button edges every tick so a press while the deadman is
+                # released cannot fire a stale toggle later.
+                grip = self._gripper_from_buttons(st)
                 if self._deadman_ok(st):
                     delta = self.to_delta(st)
-                    grip = self._gripper_from_buttons(st)
                     self.robot.servo_cartesian_delta(
                         delta, duration=self.dt, frame=self.frame, gripper=grip
                     )

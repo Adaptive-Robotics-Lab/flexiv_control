@@ -6,6 +6,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-09
+
+Fixes from the July 2026 cross-repo audit against `flexiv-spacemouse-teleop`.
+
+### Fixed
+- **SpaceMouse gripper toggle was level-triggered**: holding the button flipped
+  the gripper open/closed once per control tick (~100 Hz on the default loop).
+  It now toggles only on the button's rising edge, tracked every tick (also
+  while the deadman is released and inside `intervention()`), matching the ROS
+  teleop bridge's behaviour.
+- **ROS bridge `~/delta_twist_cmds` treated unitless commands as m/s**: the
+  node advertises itself as a drop-in target for a MoveIt-Servo teleop
+  pipeline, but such pipelines publish joystick-style values in `[-1, 1]` that
+  Servo scales down (0.4 m/s / 0.8 rad/s in the flexiv_ros2 config). Feeding
+  them straight in executed ~2.5x faster than the Servo path. The node now
+  defaults to `twist_in_type: unitless` with matching `twist_scale_linear` /
+  `twist_scale_rotational` parameters (`speed_units` restores the old
+  behaviour), and drops commands older than `twist_max_age` (default 0.25 s).
+
+### Changed
+- Gripper toggle conventions now match the lab's ROS teleop bridge: GN01
+  widths 0.09 m open / 0.01 m close (was 0.08 / 0.0), and the first press
+  OPENS (was: first press closed). Configure with `gripper_open_width`,
+  `gripper_close_width`, `initial_open`.
+- `SpaceMouseTeleop` accepts `signs` (six +/-1 values) to calibrate device
+  axes to the robot frame without a custom source subclass.
+
+### Housekeeping
+- Versions 0.1.6-0.1.8 were lab-internal iterations installed on the control
+  PC without changelog entries or tags; their changes are folded into this
+  release.
+
 ## [0.1.5] - 2026-06-19
 
 ### Fixed: 3 more flexiv_rdk-backend bugs from the first real-hardware session
