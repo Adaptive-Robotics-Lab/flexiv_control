@@ -120,7 +120,7 @@ class SpaceMouseTeleop:
         gripper_button: int = 1,
         gripper_open_width: float = 0.09,
         gripper_close_width: float = 0.01,
-        initial_open: bool = False,
+        initial_open: Optional[bool] = None,
         signs: Optional[List[float]] = None,
         frame: str = "base",
         owner: str = "spacemouse",
@@ -138,9 +138,10 @@ class SpaceMouseTeleop:
         self.owner = owner
         self.gripper_open_width = float(gripper_open_width)
         self.gripper_close_width = float(gripper_close_width)
-        # Matches the ROS teleop bridge convention: assume closed at start so
-        # the FIRST gripper-button press opens.
-        self._gripper_open = bool(initial_open)
+        # None: infer from the robot's reported gripper width on first use
+        # (falls back to closed, matching the ROS teleop bridge convention that
+        # the first press opens).
+        self._gripper_open: Optional[bool] = None if initial_open is None else bool(initial_open)
         # Optional per-axis sign flips [x, y, z, rx, ry, rz] so the device's
         # axes can be calibrated to the robot frame (all +1 by default).
         self.signs = np.ones(6) if signs is None else np.asarray(signs, float).reshape(6)
@@ -163,6 +164,15 @@ class SpaceMouseTeleop:
         out[np.abs(v) < self.deadband] = 0.0
         return out
 
+    def _gripper_is_open(self) -> bool:
+        if self._gripper_open is None:
+            try:
+                width = float(self.robot.get_state().gripper_width)
+                self._gripper_open = width > 0.04
+            except Exception:
+                self._gripper_open = False
+        return self._gripper_open
+
     def _deadman_ok(self, st: SpaceMouseState) -> bool:
         if self.deadman_button is None:
             return True
@@ -184,7 +194,7 @@ class SpaceMouseTeleop:
         self._prev_gripper_button = pressed
         if not rising:
             return None
-        self._gripper_open = not self._gripper_open
+        self._gripper_open = not self._gripper_is_open()
         width = self.gripper_open_width if self._gripper_open else self.gripper_close_width
         return GripperCommand(width=width, force=20.0, grasp=not self._gripper_open)
 
@@ -205,7 +215,7 @@ class SpaceMouseTeleop:
         a = np.zeros(7)
         a[:3] = np.clip(self._apply_deadband(st.translation), -1, 1)
         a[3:6] = np.clip(self._apply_deadband(st.rotation), -1, 1)
-        a[6] = -1.0 if not self._gripper_open else 1.0
+        a[6] = 1.0 if self._gripper_is_open() else -1.0
         return a, True
 
     # -- teleop loop ---------------------------------------------------------
@@ -224,13 +234,17 @@ class SpaceMouseTeleop:
                 if max_ticks is not None and ticks >= max_ticks:
                     break
                 st = self.source.read()
-                # Track button edges every tick so a press while the deadman is
-                # released cannot fire a stale toggle later.
+                # Button edges are tracked every tick; the gripper is NOT
+                # deadman-gated (matching the ROS bridge), so a press with the
+                # deadman released still actuates it, with zero motion.
                 grip = self._gripper_from_buttons(st)
                 if self._deadman_ok(st):
-                    delta = self.to_delta(st)
                     self.robot.servo_cartesian_delta(
-                        delta, duration=self.dt, frame=self.frame, gripper=grip
+                        self.to_delta(st), duration=self.dt, frame=self.frame, gripper=grip
+                    )
+                elif grip is not None:
+                    self.robot.servo_cartesian_delta(
+                        np.zeros(6), duration=self.dt, frame=self.frame, gripper=grip
                     )
                 ticks += 1
                 next_tick += self.dt

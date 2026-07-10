@@ -27,9 +27,17 @@ Fixes from the July 2026 cross-repo audit against `flexiv-spacemouse-teleop`.
 
 ### Changed
 - Gripper toggle conventions now match the lab's ROS teleop bridge: GN01
-  widths 0.09 m open / 0.01 m close (was 0.08 / 0.0), and the first press
-  OPENS (was: first press closed). Configure with `gripper_open_width`,
-  `gripper_close_width`, `initial_open`.
+  widths 0.09 m open / 0.01 m close (was 0.08 / 0.0). The initial open/closed
+  state is inferred from the robot's reported gripper width on first use
+  (fallback: closed, so the first press opens); override with `initial_open`.
+- The gripper button is no longer deadman-gated in `run()`: a rising edge with
+  the deadman released actuates the gripper with zero motion (previously the
+  edge was consumed and the internal state flipped while the command was
+  dropped, desynchronizing state from the physical gripper).
+- The ROS bridge integrates twists over the actual inter-message interval
+  (capped at `twist_max_age`) instead of a fixed `robot.dt`, so the realized
+  speed no longer scales with the publisher's rate; jog parameters are
+  validated before the robot is connected.
 - `SpaceMouseTeleop` accepts `signs` (six +/-1 values) to calibrate device
   axes to the robot frame without a custom source subclass.
 

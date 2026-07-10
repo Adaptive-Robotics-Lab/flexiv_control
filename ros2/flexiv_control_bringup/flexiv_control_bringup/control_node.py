@@ -85,6 +85,16 @@ class FlexivControlNode(Node):
         control_hz = float(self.get_parameter("control_hz").value)
         profile = self.get_parameter("safety_profile").value
 
+        # Validate jog parameters before touching the hardware so a config
+        # error cannot leave a connected robot in servo mode behind a crash.
+        self.twist_in_type = str(self.get_parameter("twist_in_type").value)
+        if self.twist_in_type not in ("unitless", "speed_units"):
+            raise ValueError(f"twist_in_type must be 'unitless' or 'speed_units', got {self.twist_in_type!r}")
+        self.twist_scale_linear = float(self.get_parameter("twist_scale_linear").value)
+        self.twist_scale_rotational = float(self.get_parameter("twist_scale_rotational").value)
+        self.twist_max_age = float(self.get_parameter("twist_max_age").value)
+        self._last_twist_time = None
+
         self.get_logger().info(
             f"starting flexiv_control bridge: backend={backend} profile={profile}"
         )
@@ -130,13 +140,6 @@ class FlexivControlNode(Node):
             cancel_callback=lambda _g: CancelResponse.ACCEPT,
             callback_group=cb,
         )
-        self.twist_in_type = str(self.get_parameter("twist_in_type").value)
-        if self.twist_in_type not in ("unitless", "speed_units"):
-            raise ValueError(f"twist_in_type must be 'unitless' or 'speed_units', got {self.twist_in_type!r}")
-        self.twist_scale_linear = float(self.get_parameter("twist_scale_linear").value)
-        self.twist_scale_rotational = float(self.get_parameter("twist_scale_rotational").value)
-        self.twist_max_age = float(self.get_parameter("twist_max_age").value)
-
         self.get_logger().info("flexiv_control bridge ready")
 
     # -- publishers ----------------------------------------------------------
@@ -187,8 +190,17 @@ class FlexivControlNode(Node):
                 x * self.twist_scale_rotational for x in v[3:]
             ]
 
-        # Integrate the velocity over one control dt to get a per-tick delta.
-        dt = self.robot.dt
+        # Integrate the velocity over the ACTUAL time since the previous
+        # command (like MoveIt Servo), so the realized speed does not depend
+        # on the publisher's rate. The interval is capped so a long gap after
+        # a pause cannot produce one large jump.
+        now_s = self.get_clock().now().nanoseconds * 1e-9
+        max_gap = self.twist_max_age if self.twist_max_age > 0.0 else 0.1
+        if self._last_twist_time is None:
+            dt = self.robot.dt
+        else:
+            dt = min(max(now_s - self._last_twist_time, 0.0), max_gap)
+        self._last_twist_time = now_s
         delta = [x * dt for x in v]
         if any(abs(d) > 1e-9 for d in delta):
             try:

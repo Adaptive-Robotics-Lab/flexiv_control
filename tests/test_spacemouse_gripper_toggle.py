@@ -53,3 +53,53 @@ def test_signs_flip_axes():
     st = SpaceMouseState(translation=np.array([0.5, 0.5, 0.0]), rotation=np.zeros(3))
     delta = t.to_delta(st)
     assert delta[0] == -delta[1]
+
+
+class _FakeRobot:
+    """Records servo calls; reports a wide-open gripper."""
+
+    def __init__(self, width=0.09):
+        self._width = width
+        self.calls = []
+
+    def get_state(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(gripper_width=self._width)
+
+    def acquire_lease(self, *a, **k):
+        pass
+
+    def start_cartesian_impedance(self, *a, **k):
+        pass
+
+    def servo_cartesian_delta(self, delta, duration=None, frame=None, gripper=None):
+        self.calls.append((np.asarray(delta, float).copy(), gripper))
+
+
+def test_initial_state_inferred_from_robot_width():
+    robot = _FakeRobot(width=0.09)  # physically open
+    t = SpaceMouseTeleop(robot=robot, source=ScriptedSpaceMouseSource())
+    cmd = t._gripper_from_buttons(SpaceMouseState(buttons=[0, 1]))
+    assert cmd is not None
+    assert cmd.width == t.gripper_close_width  # open -> first press closes
+    assert cmd.grasp is True
+
+
+def test_gripper_actuates_with_deadman_released():
+    robot = _FakeRobot()
+    presses = iter([
+        SpaceMouseState(buttons=[0, 0]),
+        SpaceMouseState(buttons=[0, 1]),  # gripper press, deadman released
+        SpaceMouseState(buttons=[0, 1]),
+        SpaceMouseState(buttons=[0, 0]),
+    ])
+    t = SpaceMouseTeleop(
+        robot=robot,
+        source=ScriptedSpaceMouseSource(lambda _t: next(presses)),
+        publish_hz=1000.0,
+    )
+    t.run(max_ticks=4)
+    grips = [g for _d, g in robot.calls if g is not None]
+    assert len(grips) == 1, "one rising edge -> exactly one gripper command"
+    deltas = [d for d, g in robot.calls if g is not None]
+    assert np.allclose(deltas[0], 0.0), "no motion while the deadman is released"
