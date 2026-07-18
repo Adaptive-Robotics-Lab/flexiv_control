@@ -13,8 +13,8 @@ top level:
 
 ```python
 from flexiv_control import (
-    CartesianChunk, CartesianWaypoint, CartesianDelta,
-    JointChunk, JointWaypoint, GripperCommand, ExecutionResult,
+    CartesianTrajectory, CartesianWaypoint, CartesianDelta,
+    JointTrajectory, JointWaypoint, GripperCommand, ExecutionResult,
 )
 ```
 
@@ -31,7 +31,7 @@ These hold everywhere in the library, end to end:
   `"flange"`, `"world"`); the default is `"base"`.
 - **`n_frames` and `duration` are interchangeable.** A waypoint may specify
   either. `n_frames` (a per-waypoint frame count) is converted to seconds at the active
-  control rate: `duration = n_frames / control_hz`. The same chunk therefore
+  control rate: `duration = n_frames / control_hz`. The same trajectory therefore
   runs identically whether the loop is 100 Hz or 1 kHz, as long as `n_frames`
   is interpreted at that rate.
 
@@ -52,23 +52,23 @@ CartesianWaypoint(
 position-only planner (one emitting `(x, y, z)` waypoints) wants — it maps in with
 zero changes. A waypoint must specify either `n_frames` or `duration`.
 
-## `CartesianChunk` — the core action type
+## `CartesianTrajectory` — the core action type
 
 A short, bounded sequence of waypoints. Used by a receding-horizon planner (execute the first
 segment, then replan), MPC (the first slice of a horizon), scripted
 manipulation, and high-level RL.
 
 ```python
-CartesianChunk(
+CartesianTrajectory(
     waypoints,                       # List[CartesianWaypoint], >= 1
     impedance=ImpedanceParams(),     # compliance (applied when the executor
                                      #   auto-starts the Cartesian mode)
     force_control=None,              # ForceControlParams or None
     max_tcp_linear_speed=0.25,       # m/s    } TIGHTENING-ONLY: the executor runs
-    max_tcp_angular_speed=0.60,      # rad/s  } at min(chunk cap, profile cap)
+    max_tcp_angular_speed=0.60,      # rad/s  } at min(trajectory cap, profile cap)
     max_tcp_linear_acc=1.0,          # m/s^2  } ADVISORY metadata only (the
     max_tcp_angular_acc=2.0,         # rad/s^2} profile's max_linear_accel binds)
-    max_contact_wrench=None,         # [fx,..]; min(chunk, profile); None -> profile
+    max_contact_wrench=None,         # [fx,..]; min(trajectory, profile); None -> profile
     safety_profile="",               # "" = run under the active profile; a
                                      #   non-empty name is VERIFIED against the
                                      #   active profile (mismatch raises) and both
@@ -79,57 +79,57 @@ CartesianChunk(
 
 Execution notes:
 
-- `execute_cartesian_chunk` **auto-ensures the NRT Cartesian impedance mode**
-  (with the chunk's `impedance`) when the backend is not already in a Cartesian
+- `execute_cartesian_trajectory` **auto-ensures the NRT Cartesian impedance mode**
+  (with the trajectory's `impedance`) when the backend is not already in a Cartesian
   mode, so a missing `start_cartesian_impedance()` is no longer a
   hardware-only failure.
 - Segments whose implied speed exceeds the effective cap are **time-stretched**
-  by the interpolator (the chunk still reaches its waypoints, just no faster
+  by the interpolator (the trajectory still reaches its waypoints, just no faster
   than the cap) -- wall-clock execution can exceed the nominal
   `total_duration`. Use `ExecutionResult.executed_duration` for the truth, or
   estimate ahead with the active profile's caps
   (`RemoteRobot.get_safety_profile()`).
-- Preflight a chunk against the active envelope with
-  `profile.validate_chunk(chunk)` instead of duplicating workspace constants
+- Preflight a trajectory against the active envelope with
+  `profile.validate_chunk(trajectory)` instead of duplicating workspace constants
   client-side.
 
-Helpful attributes: `chunk.horizon` (number of waypoints) and
-`chunk.total_duration(control_hz)`.
+Helpful attributes: `trajectory.horizon` (number of waypoints) and
+`trajectory.total_duration(control_hz)`.
 
-### `CartesianChunk.from_waypoint_array(u)` — ingest a planner's action array
+### `CartesianTrajectory.from_waypoint_array(u)` — ingest a planner's action array
 
 A common receding-horizon / action-chunking action has the form `u = ((x_j, y_j, z_j, w_j, n_j))_{j=1..H}`:
 a short sequence of Cartesian positions, each with a normalised gripper command
 `w_j ∈ [0, 1]` (1 = open, 0 = closed) and an integer number of low-level control
-frames `n_j`. This constructor turns that `(H, 5)` array straight into a chunk:
+frames `n_j`. This constructor turns that `(H, 5)` array straight into a trajectory:
 
 ```python
 import numpy as np
-from flexiv_control import CartesianChunk
+from flexiv_control import CartesianTrajectory
 
 u = np.array([
     [0.45, 0.00, 0.30, 1.0, 20],   # reach, gripper open, 20 frames
     [0.50, 0.00, 0.22, 1.0, 15],   # descend
     [0.50, 0.00, 0.22, 0.0, 10],   # close gripper
 ])
-chunk = CartesianChunk.from_waypoint_array(u)            # orientation held throughout
+trajectory = CartesianTrajectory.from_waypoint_array(u)            # orientation held throughout
 ```
 
 The normalised gripper maps to a width with `width = clip(w, 0, 1) * 0.08`
 (≈ the 80 mm stroke of the lab's gripper). Override `gripper_force=` and pass any
-`CartesianChunk` field through `**chunk_kwargs` (e.g.
+`CartesianTrajectory` field through `**chunk_kwargs` (e.g.
 `safety_profile="contact_manipulation"`). `from_waypoint_array` is position-only,
 so orientation is always held; use `from_pose_array` (below) to command it.
 
-### Canonical chunk extensions
+### Canonical trajectory extensions
 
-`CartesianChunk` is a *canonical* action chunk: beyond the per-waypoint SE(3)
-pose + gripper + duration and the per-chunk impedance/force/limits, it carries:
+`CartesianTrajectory` is a *canonical* action trajectory: beyond the per-waypoint SE(3)
+pose + gripper + duration and the per-trajectory impedance/force/limits, it carries:
 
-- **`representation`** (`ChunkRepresentation.ABSOLUTE` default, or
+- **`representation`** (`TrajectoryRepresentation.ABSOLUTE` default, or
   `RELATIVE_TO_START`). Absolute = waypoints are targets in `frame` (the
   ALOHA/DROID convention). Relative = each waypoint is a pose *relative to the
-  TCP pose at chunk start* (`T_abs = T_start · T_rel`, the UMI relative-trajectory
+  TCP pose at trajectory start* (`T_abs = T_start · T_rel`, the UMI relative-trajectory
   convention), re-anchored to the live pose at execution so it never accumulates
   sequential step-to-step error. Which is better is task/calibration dependent —
   it is an explicit field, not a baked-in default.
@@ -142,9 +142,9 @@ pose + gripper + duration and the per-chunk impedance/force/limits, it carries:
   the position-only `(H, 5)` `from_waypoint_array`.
 
 ```python
-from flexiv_control import CartesianChunk, ChunkRepresentation
-chunk = CartesianChunk.from_pose_array(u_h9,         # (H, 9) SE(3) + gripper + n
-                                       representation=ChunkRepresentation.RELATIVE_TO_START,
+from flexiv_control import CartesianTrajectory, TrajectoryRepresentation
+trajectory = CartesianTrajectory.from_pose_array(u_h9,         # (H, 9) SE(3) + gripper + n
+                                       representation=TrajectoryRepresentation.RELATIVE_TO_START,
                                        n_execute=8)   # predict H, execute 8, replan
 ```
 
@@ -166,17 +166,17 @@ CartesianDelta(
 You rarely build this by hand — `Robot.servo_cartesian_delta([...])` and the Gym
 env do it for you.
 
-## Joint space — `JointWaypoint` / `JointChunk`
+## Joint space — `JointWaypoint` / `JointTrajectory`
 
 For resets, homing, and executing a planned joint trajectory (e.g. from MoveIt):
 
 ```python
 JointWaypoint(positions, n_frames=None, duration=None)   # give one of the two
 
-JointChunk(
+JointTrajectory(
     waypoints,                      # List[JointWaypoint], >= 1
     max_joint_speed_scale=0.3,      # fraction of nominal joint-velocity limits
-    safety_profile="",              # same semantics as CartesianChunk: "" = active
+    safety_profile="",              # same semantics as CartesianTrajectory: "" = active
 )
 ```
 
@@ -207,9 +207,9 @@ the commanded width to be tracked. The MuJoCo backend mirrors this (a grasp
 command drives the fingers closed and contact physics stops them), so sim and
 real agree. Gripper RPCs are fire-and-forget by default; use
 `command_gripper(cmd, wait=True)` to block until the fingers settle (no more
-do-nothing hold-pose chunks as a wait workaround).
+do-nothing hold-pose trajectories as a wait workaround).
 
-A gripper command embedded in a chunk waypoint is emitted on the FIRST tick of
+A gripper command embedded in a trajectory waypoint is emitted on the FIRST tick of
 that waypoint's segment and runs concurrently with the motion toward the
 waypoint -- give the gripper its own (near-)stationary waypoint when you need
 it to finish before the arm moves on.
@@ -222,7 +222,7 @@ and quantifiable rather than a guess. The planner can attribute a bad outcome to
 execution vs perception/ranking *with evidence*.
 
 ```python
-result = robot.execute_cartesian_chunk(chunk)
+result = robot.execute_cartesian_trajectory(trajectory)
 result.success              # bool
 result.clipped              # was any setpoint modified to stay in bounds?
 result.stop_reason          # "none" | "workspace_limit" | "contact_wrench" | ...
@@ -236,7 +236,7 @@ result.final_state          # RobotState snapshot at the end
 result.log                  # dict of extra diagnostics
 ```
 
-A planner that logs `clipped` / `stop_reason` / `path_tracking_error` per chunk
+A planner that logs `clipped` / `stop_reason` / `path_tracking_error` per trajectory
 gets a clean signal for *why* a rollout failed — see
 [integration_planner.md](integration_planner.md).
 
@@ -244,11 +244,11 @@ gets a clean signal for *why* a rollout failed — see
 
 | Consumer | Emits | Path |
 |---|---|---|
-| Receding-horizon planner | `CartesianChunk.from_waypoint_array(u)` | execute first segment → replan |
-| MPC loop | `CartesianDelta` per tick, or first slice of a horizon as a `CartesianChunk` | [integration_mpc.md](integration_mpc.md) |
+| Receding-horizon planner | `CartesianTrajectory.from_waypoint_array(u)` | execute first segment → replan |
+| MPC loop | `CartesianDelta` per tick, or first slice of a horizon as a `CartesianTrajectory` | [integration_mpc.md](integration_mpc.md) |
 | RL policy | `[dx,dy,dz,drx,dry,drz,gripper]` → `CartesianDelta` (via `FlexivRealEnv`) | [integration_rl.md](integration_rl.md) |
 | SpaceMouse teleop / RL intervention | `CartesianDelta` per tick | [integration_teleop.md](integration_teleop.md) |
-| Reset / home / MoveIt plan | `JointChunk` | `Robot.move_joint` / `execute_joint_chunk` |
+| Reset / home / MoveIt plan | `JointTrajectory` | `Robot.move_joint` / `execute_joint_trajectory` |
 
 Because the contract is the only thing crossing the boundary, the network server
 ([architecture.md](architecture.md)), the Gym env, and the ROS 2 overlay are all

@@ -31,9 +31,9 @@ communities actually use. They disagree on details but agree on the skeleton:
   training, and visualization tooling; emitting a `LeRobotDataset` from the
   recorded frames is a thin caller-side step (its dataset API moves between
   releases).
-- **SAIL** (arXiv 2506.11948) — a 4-level Franka hierarchy: policy chunk → NUC
+- **SAIL** (arXiv 2506.11948) — a 4-level Franka hierarchy: policy trajectory → NUC
   interpolation at 100 Hz → OSC → torque at 500 Hz — a clean illustration of the
-  "chunk on top, fast servo underneath" pattern.
+  "trajectory on top, fast servo underneath" pattern.
 
 **The common skeleton:** a host-side real-time (or near-real-time) control loop,
 a thin Python client, **one** action interface shared by every consumer, and
@@ -43,7 +43,7 @@ skeleton, specialized to the Rizon.
 ## Decisions that follow
 
 1. **The action contract is the product.** Everything else is replaceable. We
-   make `CartesianChunk` (+ `from_waypoint_array`), `CartesianDelta`, `JointChunk`,
+   make `CartesianTrajectory` (+ `from_waypoint_array`), `CartesianDelta`, `JointTrajectory`,
    `GripperCommand`, and `ExecutionResult` the stable spine, so a policy, an MPC,
    an RL env, and a teleop pendant all speak one language. See
    [action_contract.md](action_contract.md).

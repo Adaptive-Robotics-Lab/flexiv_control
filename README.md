@@ -45,8 +45,8 @@ Polymetis, frankapy, SERL/HIL-SERL, and LeRobot converged on
 
 ## Features
 
-- **One action contract** — `CartesianChunk` / `CartesianDelta` / `JointChunk` +
-  `GripperCommand`, with absolute or relative-to-chunk-start poses, a
+- **One action contract** — `CartesianTrajectory` / `CartesianDelta` / `JointTrajectory` +
+  `GripperCommand`, with absolute or relative-to-trajectory-start poses, a
   predict-vs-execute horizon, and a quantified `ExecutionResult`.
 - **Safety is first-class** — named, version-controlled `SafetyProfile`s and a
   microsecond per-tick `SafetyFilter` (workspace box, speed/jump caps, joint
@@ -60,7 +60,7 @@ Polymetis, frankapy, SERL/HIL-SERL, and LeRobot converged on
 - **Multi-user safe** — an in-process lease and a host-wide lock so two processes
   can't fight over the arm.
 - **See what it WILL do** — `flexiv-control viz` mirrors the robot live in any
-  browser on the LAN and previews each chunk's **intended motion** (the true
+  browser on the LAN and previews each trajectory's **intended motion** (the true
   per-tick command path, time-colored, with gripper events, a workspace box,
   an animated ghost, and an optional Approve/Reject gate) before it executes —
   for safety and debugging. See [docs/visualization.md](docs/visualization.md).
@@ -96,15 +96,15 @@ See [docs/flexiv_setup.md](docs/flexiv_setup.md) for real-robot bring-up and
 No hardware needed — the `fake` backend is dependency-free:
 
 ```python
-from flexiv_control import Robot, RobotConfig, CartesianChunk
+from flexiv_control import Robot, RobotConfig, CartesianTrajectory
 
 robot = Robot(RobotConfig(backend="fake"))     # or "mujoco" / "flexiv_rdk"
 robot.connect()
 robot.start_cartesian_impedance()
 
-chunk = CartesianChunk.from_waypoint_array([[0.45, 0.0, 0.30, 1.0, 20],
+trajectory = CartesianTrajectory.from_waypoint_array([[0.45, 0.0, 0.30, 1.0, 20],
                                             [0.50, 0.0, 0.25, 0.0, 20]])
-result = robot.execute_cartesian_chunk(chunk)
+result = robot.execute_cartesian_trajectory(trajectory)
 print(result.success, result.path_tracking_error)
 
 robot.disconnect()
@@ -123,7 +123,7 @@ server, Gym env, and ROS overlay are all pure pass-through:
 ```
  Language policy   MPC planner   RL trainer   SpaceMouse
         \              |             |            /
-         └──►  CartesianChunk / CartesianDelta / JointChunk  ◄──┘
+         └──►  CartesianTrajectory / CartesianDelta / JointTrajectory  ◄──┘
                               │
             Robot facade → SafetyFilter (per-tick) → Interpolator → backend → Rizon
 ```
@@ -146,8 +146,8 @@ real-time modes) — sharing the same contract. The
 
 | File | Shows |
 |---|---|
-| `examples/01_fake_hello.py` | connect, read state, run a chunk on `fake` |
-| `examples/02_cartesian_chunk.py` | the action contract and `ExecutionResult` |
+| `examples/01_fake_hello.py` | connect, read state, run a trajectory on `fake` |
+| `examples/02_cartesian_trajectory.py` | the action contract and `ExecutionResult` |
 | `examples/03_rl_gym_env.py` | Gymnasium env + HIL-SERL intervention |
 | `examples/04_mpc_loop.py` | a high-rate closed loop |
 | `examples/05_spacemouse_teleop.py` | teleop (scripted, or `--device`) |
@@ -159,7 +159,7 @@ real-time modes) — sharing the same contract. The
 | Doc | What |
 |---|---|
 | [architecture.md](docs/architecture.md) | the stack, the two RT tiers, components, boundaries |
-| [action_contract.md](docs/action_contract.md) | the contract objects, conventions, chunk constructors |
+| [action_contract.md](docs/action_contract.md) | the contract objects, conventions, trajectory constructors |
 | [safety.md](docs/safety.md) | profiles, the filter, the shipped profiles, tuning |
 | [flexiv_setup.md](docs/flexiv_setup.md) | bringing up a real Rizon, licenses, first-run checklist |
 | [versions.md](docs/versions.md) | RDK version sensitivity and the `# VERIFY:` markers |
@@ -179,7 +179,7 @@ teleop, and the **MuJoCo simulation (including the GN01 gripper)** are tested in
 (Python 3.8 / 3.10 / 3.12). The **`flexiv_rdk` real-hardware backend is now
 HARDWARE-VALIDATED** on a **Rizon4s (serial Rizon4s-062626, RDK-Professional,
 flexivrdk 1.7)** for the **NRT pick-place path**: enable → F/T-sensor zero →
-NRT_CARTESIAN_MOTION_FORCE (cartesian impedance) → NRT joint chunks → GN01 gripper →
+NRT_CARTESIAN_MOTION_FORCE (cartesian impedance) → NRT joint trajectories → GN01 gripper →
 `go_home_safe` all run end-to-end (see CHANGELOG `0.1.5`/`0.1.4`). Four RDK-1.7 API
 mismatches found there are fixed: gripper `Enable(name)`, the `Mode` enum (1.7 has no
 `RT_*`), `ZeroFTSensor`-on-connect (force-mode prerequisite), and `SendJointPosition`'s

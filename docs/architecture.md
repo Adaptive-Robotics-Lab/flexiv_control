@@ -16,8 +16,8 @@ setpoints at the control rate, and report back what actually happened.
                     │               │             │             │
                     ▼               ▼             ▼             ▼
             ┌─────────────────────────────────────────────────────────────┐
-   contract │      one action contract:  CartesianChunk / CartesianDelta    │
-            │                            JointChunk / GripperCommand        │
+   contract │      one action contract:  CartesianTrajectory / CartesianDelta    │
+            │                            JointTrajectory / GripperCommand        │
             └───────────────────────────────┬─────────────────────────────┘
                                              ▼
             ┌─────────────────────────────────────────────────────────────┐
@@ -67,10 +67,10 @@ See [design_rationale.md](design_rationale.md) for why this beats a
 
 | Component | File | Responsibility |
 |---|---|---|
-| Action contract | `action_chunk.py`, `types.py` | `CartesianChunk`/`CartesianDelta`/`JointChunk`, `GripperCommand`, `ExecutionResult`. `CartesianChunk.from_waypoint_array(u)` ingests a planner's `(H,5)` array directly. |
-| `Robot` facade | `robot.py` | The one object you use. `connect`, lease, mode start, `servo_cartesian_delta`, `execute_cartesian_chunk`, `move_joint`, `home`, `stop`. Owns the per-tick loop. |
+| Action contract | `trajectory.py`, `types.py` | `CartesianTrajectory`/`CartesianDelta`/`JointTrajectory`, `GripperCommand`, `ExecutionResult`. `CartesianTrajectory.from_waypoint_array(u)` ingests a planner's `(H,5)` array directly. |
+| `Robot` facade | `robot.py` | The one object you use. `connect`, lease, mode start, `servo_cartesian_delta`, `execute_cartesian_trajectory`, `move_joint`, `home`, `stop`. Owns the per-tick loop. |
 | Safety supervisor | `safety.py` | Named YAML `SafetyProfile` + cheap per-tick `SafetyFilter` (workspace box, speed cap, pose-jump cap, joint limits, contact-wrench stop, watchdog). Clips or rejects, and *reports*. |
-| Interpolator | `interpolation.py` | Expands a chunk into one setpoint per control tick (linear position + SLERP). **Velocity-aware**: time-stretches a segment that would exceed the profile's speed cap so it still reaches the waypoint instead of being spatially clipped short. |
+| Interpolator | `interpolation.py` | Expands a trajectory into one setpoint per control tick (linear position + SLERP). **Velocity-aware**: time-stretches a segment that would exceed the profile's speed cap so it still reaches the waypoint instead of being spatially clipped short. |
 | Backends | `backends/` | `RobotBackend` ABC; `FakeBackend` (dependency-free sim), `FlexivRdkBackend` (real), `MujocoBackend` (stub for real2sim2real). `get_backend(name)`. |
 | Server | `server/` | `FlexivControlServer`: one owner of the backend, a `Lease` (single writer, TTL + heartbeat), newline-JSON over TCP. `ReactiveServoLoop` is the always-on single-writer setpoint loop. |
 | Client | `client/` | `RemoteRobot`: mirrors the `Robot` API over the wire, with lease heartbeat. Lets an RL/MPC author on another machine drive the arm with a `pip install` and no ROS. |
@@ -84,7 +84,7 @@ See [design_rationale.md](design_rationale.md) for why this beats a
 ## Why these boundaries
 
 The contract is the spine. Every consumer (policy, MPC, RL, teleop) speaks the
-same `CartesianChunk` / `CartesianDelta`, every backend consumes the same
+same `CartesianTrajectory` / `CartesianDelta`, every backend consumes the same
 filtered setpoint stream, and the network/ROS layers are pure pass-through. That
 is what makes the same controller reusable across a receding-horizon planning
 project, a lab mate's RL work, and the wider community without forks.

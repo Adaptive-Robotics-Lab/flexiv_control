@@ -98,13 +98,13 @@ directory to keep your real-robot YAMLs outside this repo.
    flexiv-control home --config rizon4s_lab
    ```
 4. **One small motion.** Start Cartesian impedance and command a short, slow
-   chunk a few centimetres from the current pose; check `result.success`,
+   trajectory a few centimetres from the current pose; check `result.success`,
    `result.clipped`, and `result.path_tracking_error`.
 5. **Then** raise speeds and hand control to your policy / MPC / RL env.
 
 ```python
 import numpy as np
-from flexiv_control import Robot, CartesianChunk, CartesianWaypoint
+from flexiv_control import Robot, CartesianTrajectory, CartesianWaypoint
 
 robot = Robot.from_config("rizon4s_lab")
 robot.connect()
@@ -112,10 +112,10 @@ robot.start_cartesian_impedance()                    # NRT by default (Tier A)
 
 start = robot.get_state().tcp_position
 near = start + np.array([0.0, 0.0, -0.03])           # 3 cm down
-chunk = CartesianChunk(
+trajectory = CartesianTrajectory(
     waypoints=[CartesianWaypoint(position=near, duration=2.0)]  # slow: 2 s
 )
-result = robot.execute_cartesian_chunk(chunk)
+result = robot.execute_cartesian_trajectory(trajectory)
 print(result.success, result.clipped, result.path_tracking_error)
 
 robot.stop()

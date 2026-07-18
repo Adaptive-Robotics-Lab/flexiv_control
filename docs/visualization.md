@@ -2,7 +2,7 @@
 
 `flexiv_control.viz` mirrors a running robot in any browser on the LAN and --
 the part that matters for safety -- shows the **intended motion** of the next
-chunk *before* it executes: the true per-tick command path (including
+trajectory *before* it executes: the true per-tick command path (including
 time-stretching), waypoint knots, gripper open/close glyphs, the terminal pose,
 and an animated ghost TCP, with the active safety profile's workspace box and
 a wrench/status HUD alongside.
@@ -20,7 +20,7 @@ pip install "flexiv-control[viz]"     # viser (browser viewer) + yourdfpy (URDF)
 flexiv-control viz --connect <robot-pc>        # then open http://localhost:8080
 ```
 
-**Embedded in a planner** -- the process that *proposes* chunks also previews
+**Embedded in a planner** -- the process that *proposes* trajectories also previews
 them (this is what ActAhead's `--viz` flag does):
 
 ```python
@@ -30,30 +30,30 @@ viz = RobotViz()                       # frames mode; pass model=<urdf> for the 
 viz.attach(robot, allow_lease=True)    # we ARE the controlling process
 print(viz.url)
 
-pv = viz.preview_chunk(chunk)          # render the intended motion
-result = robot.execute_cartesian_chunk(chunk, record=True)
-viz.on_step(i, chunk, result)          # outcome flash + commanded-vs-measured overlay
+pv = viz.preview_chunk(trajectory)          # render the intended motion
+result = robot.execute_cartesian_trajectory(trajectory, record=True)
+viz.on_step(i, trajectory, result)          # outcome flash + commanded-vs-measured overlay
 ```
 
 With `RecedingHorizonRunner`, the viz doubles as a go/no-go gate:
 
 ```python
 runner.run(
-    on_propose=viz.gate(require_click=True),   # browser Approve/Reject per chunk
+    on_propose=viz.gate(require_click=True),   # browser Approve/Reject per trajectory
     on_step=viz.on_step,
 )
 ```
 
 `gate()` also auto-refuses a **stale** preview: if the live TCP has moved more
-than 5 mm / 2 degrees from the pose the chunk was planned from, the rendered
+than 5 mm / 2 degrees from the pose the trajectory was planned from, the rendered
 path no longer starts where the robot is, and executing it would be a lie.
 
 ## Design rules (why it is trustworthy)
 
 1. **The preview IS the executor.** `preview_chunk` runs the exact code
-   `execute_cartesian_chunk` runs -- `chunk.for_execution()` resolution,
-   tightening-only `min(chunk, profile)` caps, the real
-   `CartesianChunkInterpolator` -- so the rendered path includes
+   `execute_cartesian_trajectory` runs -- `trajectory.for_execution()` resolution,
+   tightening-only `min(trajectory, profile)` caps, the real
+   `CartesianTrajectoryInterpolator` -- so the rendered path includes
    time-stretching and is the true command stream, never a waypoint lerp.
    A regression test asserts preview == executed command stream.
 2. **TCP from the robot, never local FK.** The TCP marker, trail, and preview
@@ -64,7 +64,7 @@ path no longer starts where the robot is, and executing it would be a lie.
 3. **A monitor never owns the arm.** `flexiv-control viz --connect` uses a bare
    `RemoteRobot.connect()` -- no lease (`get_state`/`get_safety_profile` are
    lease-free, served from per-tick snapshots, and never block a running
-   chunk). `attach()` refuses a lease-holding connection unless you say
+   trajectory). `attach()` refuses a lease-holding connection unless you say
    `allow_lease=True` (the embedded-planner case). **Never** use
    `with RemoteRobot(...)` for monitoring -- `__enter__` acquires the lease.
 4. **The workspace box is the server's truth.** It is drawn from
@@ -114,8 +114,8 @@ Asset resolution order (first hit wins):
 | TCP frame (+ jaws in frames mode) | streamed `tcp_pose` + `gripper_width` (authoritative) |
 | blue trail | last ~25 s of measured TCP positions |
 | amber/red wireframe box | active safety profile workspace (clip/reject) |
-| time-colored path (blue->red) | the chunk's true per-tick command stream |
-| white knots | chunk waypoints |
+| time-colored path (blue->red) | the trajectory's true per-tick command stream |
+| white knots | trajectory waypoints |
 | green/blue spheres | gripper close / open events |
 | small frame at path end | terminal pose |
 | yellow ghost sphere | animated playback (scrub with the *preview %* slider) |

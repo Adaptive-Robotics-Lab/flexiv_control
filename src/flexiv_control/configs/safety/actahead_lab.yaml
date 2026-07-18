@@ -1,6 +1,6 @@
 # ActAhead lab safety profile -- the PICK-AND-PLACE envelope, re-derived from
 # the closed-loop runner that actually consumes it
-# (ActAhead scripts/run_real2sim2real_closed_loop.py WORKSPACE_* and chunk caps;
+# (ActAhead scripts/run_real2sim2real_closed_loop.py WORKSPACE_* and trajectory caps;
 # the previous revision was transcribed from the older push-task envelope and
 # would have speed-clipped and workspace-clipped the pick-place workload).
 # VERIFY on the real cell at low speed before the first hardware session --
@@ -23,8 +23,8 @@ workspace:
   action: reject
 
 tcp_limits:
-  max_linear_speed: 0.15    # m/s ceiling; planner chunks request 0.12 and bind
-  max_angular_speed: 0.45   # rad/s ceiling; planner chunks request 0.40
+  max_linear_speed: 0.15    # m/s ceiling; planner trajectories request 0.12 and bind
+  max_angular_speed: 0.45   # rad/s ceiling; planner trajectories request 0.40
   max_pose_jump_linear: 0.03
   max_pose_jump_angular: 0.15
 
@@ -34,11 +34,11 @@ joint_limits:
 
 contact:
   max_wrench: [40, 40, 40, 5, 5, 5]
-  # Granted ceiling for per-chunk contact_wrench_allowance (held-payload
+  # Granted ceiling for per-trajectory contact_wrench_allowance (held-payload
   # transport): a held object's static weight + cantilever torque must not
-  # read as a collision at chunk entry. Chunks REQUEST an allowance; the
+  # read as a collision at trajectory entry. Chunks REQUEST an allowance; the
   # server clamps the request to this ceiling, and collision stopping stays
-  # armed at max_wrench + allowance for the duration of that chunk only.
+  # armed at max_wrench + allowance for the duration of that trajectory only.
   max_allowance: [15, 15, 15, 3, 3, 3]
 
 watchdog:
