@@ -1,6 +1,6 @@
 """The unified [-1,1] gripper action encoding (GripperCommand.from_signed_action),
 shared by the gym env, the LeRobot adapter, and teleop -- the [-1,1]->[0,1] mirror
-of from_normalized, so the delta-action and chunk surfaces agree."""
+of from_normalized, so the delta-action and traj surfaces agree."""
 
 from __future__ import annotations
 

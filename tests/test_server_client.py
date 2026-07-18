@@ -3,7 +3,7 @@ import time
 import numpy as np
 import pytest
 
-from flexiv_control import CartesianChunk, RobotConfig
+from flexiv_control import CartesianTrajectory, RobotConfig
 from flexiv_control.client import RemoteRobot, RemoteRobotError
 from flexiv_control.server import FlexivControlServer
 
@@ -26,8 +26,8 @@ def test_remote_state_and_chunk(server):
         s = robot.get_state()
         assert s.q.shape == (7,)
         robot.start_cartesian_impedance()
-        res = robot.execute_cartesian_chunk(
-            CartesianChunk.from_waypoint_array([[0.45, 0.0, 0.30, 1.0, 20],
+        res = robot.execute_cartesian_trajectory(
+            CartesianTrajectory.from_waypoint_array([[0.45, 0.0, 0.30, 1.0, 20],
                                           [0.48, 0.0, 0.28, 0.0, 20]])
         )
         assert res.success
@@ -78,7 +78,7 @@ def test_fresh_lease_owner_does_not_inherit_stale_stop(server):
 
     alice latches a stop (client stop / disconnect handler) with no motion in
     flight, so nothing consumes the cooperative-cancel flag. Pre-fix, bob's
-    FIRST chunk then instant-aborted with ``stop=user dur=0.00`` (observed
+    FIRST traj then instant-aborted with ``stop=user dur=0.00`` (observed
     live on hardware); acquiring the lease as a FRESH owner now clears the
     stale flag."""
     srv, port = server
@@ -91,8 +91,8 @@ def test_fresh_lease_owner_does_not_inherit_stale_stop(server):
     b = RemoteRobot("127.0.0.1", port, owner="bob").connect()
     b.acquire_lease()
     b.start_cartesian_impedance()
-    res = b.execute_cartesian_chunk(
-        CartesianChunk.from_waypoint_array([[0.45, 0.0, 0.30, 1.0, 20]]))
-    assert res.success, f"first chunk of a fresh session aborted: {res.stop_reason}"
+    res = b.execute_cartesian_trajectory(
+        CartesianTrajectory.from_waypoint_array([[0.45, 0.0, 0.30, 1.0, 20]]))
+    assert res.success, f"first traj of a fresh session aborted: {res.stop_reason}"
     assert str(res.stop_reason) != "user"
     b.close()

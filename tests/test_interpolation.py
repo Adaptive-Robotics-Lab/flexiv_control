@@ -1,8 +1,8 @@
 import numpy as np
 
-from flexiv_control import CartesianChunk, CartesianWaypoint
+from flexiv_control import CartesianTrajectory, CartesianWaypoint
 from flexiv_control import transforms as T
-from flexiv_control.interpolation import CartesianChunkInterpolator
+from flexiv_control.interpolation import CartesianTrajectoryInterpolator
 
 
 def test_quat_mul_identity():
@@ -40,8 +40,8 @@ def test_integrate_pose_translation():
 def test_interpolator_tick_count_and_endpoint():
     start = np.array([0.4, 0.0, 0.3, 1, 0, 0, 0], float)
     wp = CartesianWaypoint(position=[0.5, 0.0, 0.3], n_frames=10)
-    chunk = CartesianChunk(waypoints=[wp])
-    interp = CartesianChunkInterpolator(chunk, start, control_hz=100.0)
+    traj = CartesianTrajectory(waypoints=[wp])
+    interp = CartesianTrajectoryInterpolator(traj, start, control_hz=100.0)
     setpoints = interp.setpoints()
     assert len(setpoints) == 10  # n_frames at the matching rate
     last_pose, _ = setpoints[-1]
@@ -51,6 +51,6 @@ def test_interpolator_tick_count_and_endpoint():
 def test_interpolator_holds_orientation():
     start = np.array([0.4, 0.0, 0.3, 1, 0, 0, 0], float)
     wp = CartesianWaypoint(position=[0.5, 0.0, 0.3], duration=0.05)  # quaternion None -> hold
-    interp = CartesianChunkInterpolator(CartesianChunk(waypoints=[wp]), start, 100.0)
+    interp = CartesianTrajectoryInterpolator(CartesianTrajectory(waypoints=[wp]), start, 100.0)
     for pose, _ in interp:
         assert np.allclose(pose[3:7], [1, 0, 0, 0], atol=1e-9)

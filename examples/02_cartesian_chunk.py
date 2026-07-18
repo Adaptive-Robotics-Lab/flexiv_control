@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""02 - Cartesian action chunks (receding-horizon planner style).
+"""02 - Cartesian action trajs (receding-horizon planner style).
 
-A receding-horizon planner emits a short chunk of Cartesian waypoints
+A receding-horizon planner emits a short traj of Cartesian waypoints
 
     u = ((x, y, z, w, n), ...)            # w = gripper in [0, 1], n = #frames
 
@@ -10,8 +10,8 @@ replans. This example shows exactly that loop against the fake backend.
 
     python examples/02_cartesian_chunk.py
 
-The key call is ``robot.execute_cartesian_chunk(chunk)`` which:
-  * expands the chunk to per-tick setpoints at ``control_hz`` (SLERP on
+The key call is ``robot.execute_cartesian_trajectory(traj)`` which:
+  * expands the traj to per-tick setpoints at ``control_hz`` (SLERP on
     orientation, gripper latched on the first tick of a segment),
   * time-stretches any segment that would exceed the safety profile's velocity
     limit (so it still reaches the waypoint, just no faster than allowed),
@@ -23,15 +23,15 @@ The key call is ``robot.execute_cartesian_chunk(chunk)`` which:
 
 import numpy as np
 
-from flexiv_control import CartesianChunk, Robot, RobotConfig
+from flexiv_control import CartesianTrajectory, Robot, RobotConfig
 
 
 def fake_policy(obs_tcp_xyz: np.ndarray, step: int) -> np.ndarray:
-    """Stand-in for a receding-horizon planner: returns a (H, 5) chunk.
+    """Stand-in for a receding-horizon planner: returns a (H, 5) traj.
 
     Here we just nudge the TCP along a little square in front of the robot and
     toggle the gripper. A real policy would build a MuJoCo scene from RGB-D,
-    CEM-sample chunks, score "future videos" with a VLM, and return the best.
+    CEM-sample trajs, score "future videos" with a VLM, and return the best.
     """
     x, y, z = obs_tcp_xyz
     targets = [
@@ -52,14 +52,14 @@ def main() -> None:
         for step in range(4):  # 4 replans
             tcp_xyz = robot.get_state().tcp_position
             u = fake_policy(tcp_xyz, step)
-            chunk = CartesianChunk.from_waypoint_array(u)
+            traj = CartesianTrajectory.from_waypoint_array(u)
 
             # Receding horizon: execute the FIRST segment only, then replan.
-            first_segment = CartesianChunk(
-                waypoints=chunk.waypoints[:1],
-                safety_profile=chunk.safety_profile,
+            first_segment = CartesianTrajectory(
+                waypoints=traj.waypoints[:1],
+                safety_profile=traj.safety_profile,
             )
-            result = robot.execute_cartesian_chunk(first_segment)
+            result = robot.execute_cartesian_trajectory(first_segment)
 
             print(
                 f"step {step}: reached {np.round(result.final_state.tcp_position, 3)} "

@@ -1,5 +1,5 @@
 """Regression tests for the audit-round fixes (frame handling, angular-speed
-enforcement, LeRobot feature schema, and the joint-chunk remote bridge)."""
+enforcement, LeRobot feature schema, and the joint-traj remote bridge)."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def test_remote_joint_chunk_and_disconnect_alias():
     import time
 
     from flexiv_control import RobotConfig
-    from flexiv_control.action_chunk import JointChunk, JointWaypoint
+    from flexiv_control.trajectory import JointTrajectory, JointWaypoint
     from flexiv_control.client import RemoteRobot
     from flexiv_control.server import FlexivControlServer
 
@@ -78,8 +78,8 @@ def test_remote_joint_chunk_and_disconnect_alias():
         rr.connect()
         rr.acquire_lease("tester")  # positional owner must not raise
         rr.start_joint_impedance()
-        chunk = JointChunk(waypoints=[JointWaypoint(positions=np.zeros(7), duration=0.05)])
-        res = rr.execute_joint_chunk(chunk)
+        traj = JointTrajectory(waypoints=[JointWaypoint(positions=np.zeros(7), duration=0.05)])
+        res = rr.execute_joint_trajectory(traj)
         assert res.success
         rr.disconnect()  # alias for close()
     finally:

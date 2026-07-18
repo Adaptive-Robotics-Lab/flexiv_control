@@ -68,7 +68,7 @@ class ReactiveServoLoop:
         self._target_q: Optional[np.ndarray] = None
         self._target_gripper: Optional[GripperCommand] = None
         self._cmd_stamp = 0.0
-        self._chunk_iter = None  # active async chunk being streamed, if any
+        self._traj_iter = None  # active async traj being streamed, if any
 
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -81,7 +81,7 @@ class ReactiveServoLoop:
     ) -> None:
         with self._lock:
             self._cartesian = True
-            self._chunk_iter = None  # a manual target preempts any async chunk
+            self._traj_iter = None  # a manual target preempts any async traj
             self._target_pose = np.asarray(pose, float).reshape(7).copy()
             if gripper is not None:
                 self._target_gripper = gripper
@@ -90,32 +90,32 @@ class ReactiveServoLoop:
     def set_joint_target(self, q: np.ndarray) -> None:
         with self._lock:
             self._cartesian = False
-            self._chunk_iter = None
+            self._traj_iter = None
             self._target_q = np.asarray(q, float).copy()
             self._cmd_stamp = time.time()
 
-    def enqueue_chunk(self, chunk) -> None:
-        """Stage a Cartesian chunk for the loop to interpolate and stream while
+    def enqueue_trajectory(self, traj) -> None:
+        """Stage a Cartesian traj for the loop to interpolate and stream while
         you compute the next one (async infer-ahead, NOT true real-time chunking:
-        chunk boundaries are a hard preemptive swap, not velocity-blended).
+        traj boundaries are a hard preemptive swap, not velocity-blended).
 
-        A newly enqueued chunk PREEMPTS the current one. Relative chunks are
+        A newly enqueued traj PREEMPTS the current one. Relative trajs are
         resolved against the live pose and sliced to ``horizon_exec`` first; the
         loop pulls one interpolated setpoint per tick and holds the last pose when
-        the chunk is exhausted (the watchdog still applies if you stop enqueuing).
+        the traj is exhausted (the watchdog still applies if you stop enqueuing).
         """
-        from ..interpolation import CartesianChunkInterpolator
+        from ..interpolation import CartesianTrajectoryInterpolator
 
         s = self.backend.read_state()
-        c = chunk.for_execution(s.tcp_pose)
-        interp = CartesianChunkInterpolator(
+        c = traj.for_execution(s.tcp_pose)
+        interp = CartesianTrajectoryInterpolator(
             c, s.tcp_pose, self.hz,
             max_linear_speed=self.filter.p.max_linear_speed,
             max_angular_speed=self.filter.p.max_angular_speed,
         )
         with self._lock:
             self._cartesian = True
-            self._chunk_iter = iter(interp)
+            self._traj_iter = iter(interp)
             self._cmd_stamp = time.time()
 
     # -- introspection -------------------------------------------------------
@@ -228,12 +228,12 @@ class ReactiveServoLoop:
             # the opt-in state-age watchdog protective-stops on a stale backend.
             state_age_ms = (time.time() - state.stamp) * 1000.0
 
-            # Advance an enqueued chunk: pull one interpolated setpoint per tick
+            # Advance an enqueued traj: pull one interpolated setpoint per tick
             # into the target, refreshing the command stamp so it doesn't go
-            # stale mid-chunk. When the chunk is exhausted, leave the last target
+            # stale mid-traj. When the traj is exhausted, leave the last target
             # in place (hold) until the next enqueue / manual target.
             with self._lock:
-                citer = self._chunk_iter
+                citer = self._traj_iter
             if citer is not None:
                 try:
                     pose, grip = next(citer)
@@ -245,7 +245,7 @@ class ReactiveServoLoop:
                         self._cmd_stamp = time.time()
                 except StopIteration:
                     with self._lock:
-                        self._chunk_iter = None
+                        self._traj_iter = None
 
             with self._lock:
                 cartesian = self._cartesian

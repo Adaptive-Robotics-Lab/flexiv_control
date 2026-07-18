@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from flexiv_control import (
-    CartesianChunk,
+    CartesianTrajectory,
     GripperCommand,
     LeaseError,
     Robot,
@@ -30,7 +30,7 @@ def test_execute_waypoint_chunk_tracks():
         r.start_cartesian_impedance()
         u = [[0.45, 0.0, 0.30, 1.0, 20],
              [0.50, 0.0, 0.28, 0.0, 20]]
-        res = r.execute_cartesian_chunk(CartesianChunk.from_waypoint_array(u))
+        res = r.execute_cartesian_trajectory(CartesianTrajectory.from_waypoint_array(u))
         assert res.success
         # FakeBackend tracks perfectly -> tracking error tiny, ends near target
         assert res.path_tracking_error < 0.02
@@ -91,6 +91,6 @@ def test_workspace_clip_reported_during_chunk():
     r = Robot(RobotConfig(backend="fake", control_hz=200.0))
     with r:
         r.start_cartesian_impedance()
-        wp = CartesianChunk.from_waypoint_array([[2.0, 0.0, 0.30, 1.0, 20]])  # x way out of box
-        res = r.execute_cartesian_chunk(wp)
+        wp = CartesianTrajectory.from_waypoint_array([[2.0, 0.0, 0.30, 1.0, 20]])  # x way out of box
+        res = r.execute_cartesian_trajectory(wp)
         assert res.clipped

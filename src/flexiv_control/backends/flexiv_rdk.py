@@ -367,7 +367,7 @@ class FlexivRdkBackend(RobotBackend):
         # RDK v1.x Stream/SendCartesianMotionForce take wrench[6] as the 2nd arg;
         # it only acts on axes enabled via SetForceControlAxis, so a zero default
         # is safe for pure-motion ticks. Dropping it (pose-only) silently disabled
-        # force control during chunk execution. Precedence: an explicit per-tick
+        # force control during traj execution. Precedence: an explicit per-tick
         # wrench wins; otherwise command the active mode's configured
         # target_wrench (so ForceControlParams.target_wrench is actually applied);
         # otherwise zero.

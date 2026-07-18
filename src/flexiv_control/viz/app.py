@@ -6,18 +6,18 @@ Open ``viz.url`` in any browser on the LAN and you see, live:
 * the measured TCP trail,
 * the active safety profile's workspace box (amber = clip, red = reject),
 * a wrench bar + status HUD (mode / stop reason / lease owner / loop health),
-* and -- the headline -- the INTENDED motion of the next chunk: the true
+* and -- the headline -- the INTENDED motion of the next traj: the true
   per-tick command stream (including time-stretching), time-colored
   start->end, with waypoint knots, gripper open/close glyphs, the terminal
   pose, and an animated ghost TCP, plus a staleness banner and an optional
-  Approve / Reject gate for per-chunk confirmation.
+  Approve / Reject gate for per-traj confirmation.
 
 Design rules (see docs/visualization.md for the full rationale):
 
 * The TCP marker / trail / preview anchor ALWAYS come from the robot-streamed
   ``tcp_pose`` -- never local URDF FK (flexiv_rdk #82: URDF FK is cosmetic).
 * The viewer polls ``get_state()`` (default 20 Hz); the server serves these
-  from per-tick snapshots, so polling never blocks a running chunk.
+  from per-tick snapshots, so polling never blocks a running traj.
 * A monitoring viewer must NOT own the arm: ``attach()`` refuses a
   lease-holding ``RemoteRobot`` unless ``allow_lease=True`` (the embedded
   planner case, where the caller legitimately holds the lease).
@@ -33,13 +33,13 @@ from typing import Callable, Optional, Union
 import numpy as np
 import viser
 
-from ..action_chunk import CartesianChunk, ExecutionResult
+from ..trajectory import CartesianTrajectory, ExecutionResult
 from ..safety import SafetyProfile
 from ..types import RobotState
 from . import assets
 from .preview import (
-    ChunkPreview,
-    plan_chunk_preview,
+    TrajectoryPreview,
+    plan_trajectory_preview,
     pose_distance,
     time_colors,
     trail_segments,
@@ -149,7 +149,7 @@ class RobotViz:
             self._wrench_bar = self.server.gui.add_progress_bar(0.0)
             self._wrench_md = self.server.gui.add_markdown("")
         with self.server.gui.add_folder("Intended motion"):
-            self._preview_md = self.server.gui.add_markdown("_no chunk previewed_")
+            self._preview_md = self.server.gui.add_markdown("_no traj previewed_")
             # Percent-based scrub (slider bounds are fixed at creation in viser,
             # so the index mapping happens in _place_ghost).
             self._scrub = self.server.gui.add_slider(
@@ -166,7 +166,7 @@ class RobotViz:
         self._plan_handles: list = []
         self._ghost = None
         self._ghost_frame = None
-        self._preview: Optional[ChunkPreview] = None
+        self._preview: Optional[TrajectoryPreview] = None
         self._preview_lock = threading.Lock()
 
         # -- poller -------------------------------------------------------------
@@ -320,33 +320,33 @@ class RobotViz:
         )
 
     # ---------------------------------------------------------- intended motion
-    def preview_chunk(
+    def preview_trajectory(
         self,
-        chunk: CartesianChunk,
+        traj: CartesianTrajectory,
         state: Optional[RobotState] = None,
         profile: Optional[SafetyProfile] = None,
         *,
-        chunk_id: str = "",
-    ) -> ChunkPreview:
-        """Render the chunk's TRUE intended motion (the executor's own
+        traj_id: str = "",
+    ) -> TrajectoryPreview:
+        """Render the traj's TRUE intended motion (the executor's own
         resolution + caps + interpolation) and return the
-        :class:`~flexiv_control.viz.preview.ChunkPreview`."""
+        :class:`~flexiv_control.viz.preview.TrajectoryPreview`."""
         if state is None:
             state = self._last_state
         if state is None and self._robot is not None:
             state = self._robot.get_state()
         if state is None:
-            raise RuntimeError("preview_chunk needs a RobotState (attach() a robot "
+            raise RuntimeError("preview_trajectory needs a RobotState (attach() a robot "
                                "or pass state= explicitly)")
         if profile is None:
             profile = self._profile
-        pv = plan_chunk_preview(
-            chunk, np.asarray(state.tcp_pose, float), profile, control_hz=self.control_hz
+        pv = plan_trajectory_preview(
+            traj, np.asarray(state.tcp_pose, float), profile, control_hz=self.control_hz
         )
-        self._render_preview(pv, chunk_id=chunk_id)
+        self._render_preview(pv, traj_id=traj_id)
         return pv
 
-    def _render_preview(self, pv: ChunkPreview, *, chunk_id: str = "") -> None:
+    def _render_preview(self, pv: TrajectoryPreview, *, traj_id: str = "") -> None:
         self.clear_preview()
         s = self.server.scene
         handles = []
@@ -388,7 +388,7 @@ class RobotViz:
             if pv.time_stretched else ""
         )
         warn = ("\n\n⚠ " + "\n\n⚠ ".join(pv.warnings)) if pv.warnings else ""
-        title = f"**chunk {chunk_id}**" if chunk_id else "**chunk**"
+        title = f"**traj {traj_id}**" if traj_id else "**traj**"
         self._preview_md.content = (
             f"{title}: {len(pv.waypoints)} waypoints · {pv.duration_s:.1f}s"
             f" · caps {pv.linear_speed_cap:.2f} m/s, {pv.angular_speed_cap:.2f} rad/s"
@@ -429,18 +429,18 @@ class RobotViz:
     # ------------------------------------------------------------------- gates
     def gate(
         self, *, require_click: bool = False, timeout: Optional[float] = None
-    ) -> Callable[[int, CartesianChunk], bool]:
+    ) -> Callable[[int, CartesianTrajectory], bool]:
         """An ``on_propose`` callable for
         :class:`~flexiv_control.RecedingHorizonRunner` (or any loop): renders
         the preview, refuses a STALE one (live TCP moved > 5 mm / 2° from the
         preview's start pose), and -- with ``require_click=True`` -- blocks
         until the operator presses Approve / Reject in the browser."""
 
-        def _gate(step: int, chunk: CartesianChunk) -> bool:
+        def _gate(step: int, traj: CartesianTrajectory) -> bool:
             state = self._robot.get_state() if self._robot is not None else self._last_state
             if state is None:
                 return False
-            pv = self.preview_chunk(chunk, state, chunk_id=str(step))
+            pv = self.preview_trajectory(traj, state, traj_id=str(step))
             lin, ang = pose_distance(pv.start_pose, np.asarray(state.tcp_pose, float))
             if lin > STALE_LINEAR_M or ang > STALE_ANGULAR_RAD:
                 self._preview_md.content = (
@@ -466,18 +466,18 @@ class RobotViz:
                 self._gate_event.set()
 
         self._gate_event.clear()
-        self._preview_md.content += f"\n\n⏳ awaiting Approve/Reject for chunk {step}..."
+        self._preview_md.content += f"\n\n⏳ awaiting Approve/Reject for traj {step}..."
         ok = self._gate_event.wait(timeout=timeout)
         return bool(ok and self._gate_verdict)
 
-    def on_step(self, step: int, chunk: CartesianChunk, result: ExecutionResult) -> None:
+    def on_step(self, step: int, traj: CartesianTrajectory, result: ExecutionResult) -> None:
         """Post-execution hook: clear the preview, flash the outcome, and --
         when the executor recorded a trajectory (``record=True``) -- overlay
         commanded vs measured paths for debugging."""
         self.clear_preview()
         verdict = "✅" if result.success else f"🟥 {result.stop_reason}"
         clip = " · ⚠ clipped" if result.clipped else ""
-        self._preview_md.content = f"chunk {step}: {verdict}{clip} · {result.summary()}"
+        self._preview_md.content = f"traj {step}: {verdict}{clip} · {result.summary()}"
         traj = result.log.get("trajectory") if isinstance(result.log, dict) else None
         if traj:
             rows = np.asarray(traj, float)        # [t, cmd(7), meas(7), wrench(6)]

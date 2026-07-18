@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from flexiv_control import (
-    CartesianChunk,
+    CartesianTrajectory,
     RecedingHorizonRunner,
     RemotePolicyClient,
     Robot,
@@ -63,15 +63,15 @@ def test_server_side_servo_loop_streams_holds_and_blocks():
         # blocking motion RPCs are rejected by the single-writer guard specifically
         # (match the message so an unrelated failure can't keep this green).
         with pytest.raises(RemoteRobotError, match="servo loop active"):
-            rr.execute_cartesian_chunk(
-                CartesianChunk.from_waypoint_array([[0.5, 0.0, 0.30, 1.0, 20]])
+            rr.execute_cartesian_trajectory(
+                CartesianTrajectory.from_waypoint_array([[0.5, 0.0, 0.30, 1.0, 20]])
             )
 
         # stop the loop -> blocking motion works again
         rr.stop_servo_loop()
         p = rr.get_state().tcp_pose
-        rr.execute_cartesian_chunk(
-            CartesianChunk.from_waypoint_array([[p[0], p[1], p[2], 1.0, 10]])
+        rr.execute_cartesian_trajectory(
+            CartesianTrajectory.from_waypoint_array([[p[0], p[1], p[2], 1.0, 10]])
         )
         rr.disconnect()
     finally:
@@ -135,13 +135,13 @@ def test_remote_policy_client_drives_receding_horizon():
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             if calls["n"] > 3:  # signal "done"
-                self.wfile.write(json.dumps({"chunk": None}).encode())
+                self.wfile.write(json.dumps({"traj": None}).encode())
                 return
             x, y, z = obs["tcp_pose"][0], obs["tcp_pose"][1], obs["tcp_pose"][2]
-            chunk = CartesianChunk.from_pose_array(
+            traj = CartesianTrajectory.from_pose_array(
                 np.array([[x + 0.02, y, z, 1, 0, 0, 0, 1, 40]]),
             )
-            self.wfile.write(json.dumps({"chunk": P.chunk_to_dict(chunk)}).encode())
+            self.wfile.write(json.dumps({"traj": P.trajectory_to_dict(traj)}).encode())
 
     httpd = http.server.HTTPServer(("127.0.0.1", 8822), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -153,7 +153,7 @@ def test_remote_policy_client_drives_receding_horizon():
         client = RemotePolicyClient("http://127.0.0.1:8822/infer")
         n = RecedingHorizonRunner(r, client, max_steps=10).run()
         s1 = r.get_state()
-        assert n == 3              # ran until the server returned chunk=null
+        assert n == 3              # ran until the server returned traj=null
         assert calls["n"] == 4
         assert s1.tcp_pose[0] - s0.tcp_pose[0] > 0.04  # policy advanced the arm
         r.disconnect()

@@ -1,4 +1,4 @@
-"""Tests for async chunk streaming (ReactiveServoLoop.enqueue_chunk) and the
+"""Tests for async traj streaming (ReactiveServoLoop.enqueue_trajectory) and the
 receding-horizon runner (the VLA / MPC policy-server seam)."""
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 from flexiv_control import (
-    CartesianChunk,
+    CartesianTrajectory,
     RecedingHorizonRunner,
     Robot,
     RobotConfig,
@@ -24,7 +24,7 @@ def _robot():
 
 
 def _abs_chunk(pose, n=60):
-    return CartesianChunk.from_pose_array(
+    return CartesianTrajectory.from_pose_array(
         np.concatenate([pose, [1.0, n]])[None, :]
     )
 
@@ -35,8 +35,8 @@ def test_enqueue_chunk_streams_and_holds():
         s0 = loop.get_state()
         tgt = s0.tcp_pose.copy()
         tgt[0] += 0.05
-        loop.enqueue_chunk(_abs_chunk(tgt, n=80))
-        time.sleep(1.0)  # let the loop interpolate + stream the chunk
+        loop.enqueue_trajectory(_abs_chunk(tgt, n=80))
+        time.sleep(1.0)  # let the loop interpolate + stream the traj
         s1 = loop.get_state()
         assert s1.tcp_pose[0] - s0.tcp_pose[0] > 0.03  # moved toward target
         # after exhaustion the loop HOLDS the last pose (no drift)
@@ -51,9 +51,9 @@ def test_enqueue_chunk_preempts():
         s0 = loop.get_state()
         far = s0.tcp_pose.copy()
         far[0] += 0.12
-        loop.enqueue_chunk(_abs_chunk(far, n=200))  # slow, long
+        loop.enqueue_trajectory(_abs_chunk(far, n=200))  # slow, long
         time.sleep(0.15)
-        loop.enqueue_chunk(_abs_chunk(s0.tcp_pose, n=80))  # preempt back toward start
+        loop.enqueue_trajectory(_abs_chunk(s0.tcp_pose, n=80))  # preempt back toward start
         time.sleep(0.8)
         # preempted: never reached the far target
         assert loop.get_state().tcp_pose[0] < far[0] - 0.02
@@ -94,6 +94,6 @@ def test_receding_horizon_runner_streaming():
         s0 = loop.get_state()
         runner = RecedingHorizonRunner(r, policy, max_steps=4)
         n = runner.run_streaming(loop, replan_hz=10.0)
-        time.sleep(0.5)  # let the last enqueued chunk play
+        time.sleep(0.5)  # let the last enqueued traj play
         assert n == 4
         assert loop.get_state().tcp_pose[0] - s0.tcp_pose[0] > 0.01

@@ -92,9 +92,9 @@ class RobotBackend(abc.ABC):
     def set_contact_wrench_limit(self, wrench: np.ndarray) -> None:
         """Update the robot-firmware contact-wrench guard mid-mode.
 
-        The executor calls this when a chunk carries a granted
+        The executor calls this when a traj carries a granted
         ``contact_wrench_allowance`` (held-payload transport) and again with the
-        profile cap when the chunk ends, so the firmware guard tracks the same
+        profile cap when the traj ends, so the firmware guard tracks the same
         effective cap as the host-side guards. Default no-op: sim/fake backends
         have no firmware guard; the flexiv_rdk backend overrides it with
         ``SetMaxContactWrench`` (Cartesian modes only)."""

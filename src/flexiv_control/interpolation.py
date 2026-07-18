@@ -1,7 +1,7 @@
 """Turn high-level actions into a stream of fixed-rate setpoints.
 
 The control loop runs at a fixed rate (e.g. 100 Hz NRT or 1 kHz RT). The job of
-this module is to expand a :class:`CartesianChunk` / :class:`JointChunk` /
+this module is to expand a :class:`CartesianTrajectory` / :class:`JointTrajectory` /
 :class:`CartesianDelta` into one TCP pose (or joint target) per tick, with
 smooth interpolation, so the loop just reads "the next setpoint" each cycle.
 
@@ -18,10 +18,10 @@ from typing import Iterator, List, Optional, Tuple
 import numpy as np
 
 from . import transforms as T
-from .action_chunk import (
-    CartesianChunk,
+from .trajectory import (
+    CartesianTrajectory,
     CartesianDelta,
-    JointChunk,
+    JointTrajectory,
 )
 from .types import GripperCommand
 
@@ -37,27 +37,27 @@ def _cosine_blend(s: float) -> float:
     return 0.5 - 0.5 * np.cos(np.pi * float(np.clip(s, 0.0, 1.0)))
 
 
-class CartesianChunkInterpolator:
-    """Iterate a chunk into ``(tcp_pose, gripper_or_None)`` per control tick.
+class CartesianTrajectoryInterpolator:
+    """Iterate a traj into ``(tcp_pose, gripper_or_None)`` per control tick.
 
     If ``max_linear_speed`` / ``max_angular_speed`` are given, a segment that
     would exceed them is *time-stretched* (more ticks) so it still reaches the
     waypoint, just no faster than the cap. This keeps the safety filter from
     having to spatially clip in-spec motion (which would stall the path), while
-    honouring the chunk's requested ``n_frames`` whenever it is already slow
+    honouring the traj's requested ``n_frames`` whenever it is already slow
     enough.
     """
 
     def __init__(
         self,
-        chunk: CartesianChunk,
+        traj: CartesianTrajectory,
         start_pose: np.ndarray,
         control_hz: float,
         *,
         max_linear_speed: Optional[float] = None,
         max_angular_speed: Optional[float] = None,
     ):
-        self.chunk = chunk
+        self.traj = traj
         self.hz = float(control_hz)
         self.dt = 1.0 / self.hz
         self.start_pose = np.asarray(start_pose, float).reshape(7).copy()
@@ -83,7 +83,7 @@ class CartesianChunkInterpolator:
     def __iter__(self) -> Iterator[Tuple[np.ndarray, Optional[GripperCommand]]]:
         prev_pos = self.start_pose[:3].copy()
         prev_quat = self.start_pose[3:7].copy()
-        for seg_idx, wp in enumerate(self.chunk.waypoints):
+        for seg_idx, wp in enumerate(self.traj.waypoints):
             self.current_segment = seg_idx
             tgt_pos = wp.position
             tgt_quat = prev_quat if wp.quaternion is None else wp.quaternion
@@ -105,16 +105,16 @@ class CartesianChunkInterpolator:
         return list(iter(self))
 
 
-class JointChunkInterpolator:
+class JointTrajectoryInterpolator:
     def __init__(
         self,
-        chunk: JointChunk,
+        traj: JointTrajectory,
         start_q: np.ndarray,
         control_hz: float,
         *,
         max_joint_speed: Optional[float] = None,
     ):
-        self.chunk = chunk
+        self.traj = traj
         self.hz = float(control_hz)
         self.dt = 1.0 / self.hz
         self.start_q = np.asarray(start_q, float)
@@ -122,7 +122,7 @@ class JointChunkInterpolator:
 
     def __iter__(self) -> Iterator[np.ndarray]:
         prev = self.start_q.copy()
-        for wp in self.chunk.waypoints:
+        for wp in self.traj.waypoints:
             tgt = wp.positions
             n = max(1, int(round(wp.resolve_duration(self.hz) * self.hz)))
             if self.max_joint_speed and self.max_joint_speed > 0:

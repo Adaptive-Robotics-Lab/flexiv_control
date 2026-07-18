@@ -48,20 +48,20 @@ def test_gravity_compensated_hold():
     r.start_cartesian_impedance()
     s0 = r.get_state()
     pose = s0.tcp_pose.copy()
-    from flexiv_control import CartesianChunk
+    from flexiv_control import CartesianTrajectory
 
     # command the current pose for ~0.5 s; the TCP must not drift
-    chunk = CartesianChunk.from_pose_array(
+    traj = CartesianTrajectory.from_pose_array(
         np.concatenate([pose, [1.0, 50]])[None, :], safety_profile="free_space_fast"
     )
-    r.execute_cartesian_chunk(chunk)
+    r.execute_cartesian_trajectory(traj)
     s1 = r.get_state()
     assert np.linalg.norm(s1.tcp_pose[:3] - pose[:3]) < 5e-3
     r.disconnect()
 
 
 def test_cartesian_ik_tracks_target():
-    from flexiv_control import CartesianChunk
+    from flexiv_control import CartesianTrajectory
 
     r = _robot()
     r.start_cartesian_impedance()
@@ -69,10 +69,10 @@ def test_cartesian_ik_tracks_target():
     tgt = s0.tcp_pose.copy()
     tgt[0] += 0.06
     tgt[2] -= 0.06
-    chunk = CartesianChunk.from_pose_array(
+    traj = CartesianTrajectory.from_pose_array(
         np.concatenate([tgt, [1.0, 80]])[None, :], safety_profile="free_space_fast"
     )
-    res = r.execute_cartesian_chunk(chunk)
+    res = r.execute_cartesian_trajectory(traj)
     s1 = r.get_state()
     assert res.success
     assert np.linalg.norm(s1.tcp_pose[:3] - tgt[:3]) < 0.015  # IK converged < 1.5 cm

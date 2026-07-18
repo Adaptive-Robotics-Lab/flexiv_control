@@ -6,7 +6,7 @@ that lets an RL trainer or MPC optimizer run on a different machine from the one
 holding the arm (Polymetis recommends exactly this), while the controller code
 on both sides is identical to the in-process case::
 
-    from flexiv_control import RemoteRobot, CartesianChunk
+    from flexiv_control import RemoteRobot, CartesianTrajectory
 
     with RemoteRobot("192.168.2.100", owner="mpc") as robot:
         robot.start_cartesian_impedance()
@@ -28,7 +28,7 @@ from typing import Optional
 
 import numpy as np
 
-from ..action_chunk import CartesianChunk, ExecutionResult, JointChunk
+from ..trajectory import CartesianTrajectory, ExecutionResult, JointTrajectory
 from ..types import GripperCommand, RobotState
 from ..server import protocol as P
 
@@ -56,7 +56,7 @@ class RemoteRobot:
         self.heartbeat_max_failures = heartbeat_max_failures
         self.timeout = timeout
         # Blocking motion RPCs (execute_*/move_*/home/go_home_safe and a
-        # wait=True gripper command) legitimately run for many seconds -- chunk
+        # wait=True gripper command) legitimately run for many seconds -- traj
         # segments are TIME-STRETCHED to honor speed caps, and a home ritual
         # bundles several stages into one RPC. Reading those with the short
         # default timeout used to raise client-side WHILE THE ARM KEPT MOVING
@@ -118,7 +118,7 @@ class RemoteRobot:
     # of a real robot motion: read them with `motion_timeout` instead of the
     # short default.
     _MOTION_METHODS = frozenset({
-        "execute_cartesian_chunk", "execute_joint_chunk", "move_joint",
+        "execute_cartesian_trajectory", "execute_joint_trajectory", "move_joint",
         "servo_cartesian_delta", "servo_cartesian_pose",
         "command_gripper", "home", "go_home_safe", "zero_ft_sensor",
     })
@@ -222,7 +222,7 @@ class RemoteRobot:
     def get_safety_profile(self):
         """Fetch the server's ACTIVE safety profile (workspace box, speed caps,
         ...). This is the single source of truth a client should prevalidate
-        chunks against (``profile.validate_chunk(chunk)``) instead of keeping
+        trajs against (``profile.validate_trajectory(traj)``) instead of keeping
         its own workspace constants that silently drift from the server's."""
         from ..safety import SafetyProfile
 
@@ -281,35 +281,35 @@ class RemoteRobot:
         )
         return P.result_from_dict(r["result"])
 
-    def execute_cartesian_chunk(
-        self, chunk: CartesianChunk, *, blocking: bool = True, raise_on_stop: bool = False
+    def execute_cartesian_trajectory(
+        self, traj: CartesianTrajectory, *, blocking: bool = True, raise_on_stop: bool = False
     ) -> ExecutionResult:
         # `blocking` is accepted for signature parity with Robot; the server always
         # executes synchronously, so it is a no-op on the wire. THIS connection is
-        # therefore busy until the chunk returns -- to abort a chunk in flight,
+        # therefore busy until the traj returns -- to abort a traj in flight,
         # call ``stop()`` from a separate client/connection (the server's stop
         # handler needs no lease and cancels the executing loop within one tick).
         r = self._call(
-            "execute_cartesian_chunk", owner=self.owner, chunk=P.chunk_to_dict(chunk)
+            "execute_cartesian_trajectory", owner=self.owner, traj=P.trajectory_to_dict(traj)
         )
         result = P.result_from_dict(r["result"])
         if raise_on_stop and not result.success:
-            from ..robot import ChunkStoppedError
+            from ..robot import TrajectoryStoppedError
 
-            raise ChunkStoppedError(result)
+            raise TrajectoryStoppedError(result)
         return result
 
-    def execute_joint_chunk(
-        self, chunk: JointChunk, *, raise_on_stop: bool = False
+    def execute_joint_trajectory(
+        self, traj: JointTrajectory, *, raise_on_stop: bool = False
     ) -> ExecutionResult:
         r = self._call(
-            "execute_joint_chunk", owner=self.owner, chunk=P.joint_chunk_to_dict(chunk)
+            "execute_joint_trajectory", owner=self.owner, traj=P.joint_trajectory_to_dict(traj)
         )
         result = P.result_from_dict(r["result"])
         if raise_on_stop and not result.success:
-            from ..robot import ChunkStoppedError
+            from ..robot import TrajectoryStoppedError
 
-            raise ChunkStoppedError(result)
+            raise TrajectoryStoppedError(result)
         return result
 
     def move_joint(

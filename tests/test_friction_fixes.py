@@ -3,14 +3,14 @@
 Each test pins one of the audited failure modes:
 * move_joint(max_joint_speed=...) -- the home-restore call shape that used to
   TypeError and silently break the exit ritual;
-* execute_cartesian_chunk auto-ensures the Cartesian mode (and the FakeBackend
+* execute_cartesian_trajectory auto-ensures the Cartesian mode (and the FakeBackend
   now REJECTS streaming in IDLE, so dry runs reveal mode-sequencing bugs);
-* the chunk kinematic envelope tightens (never relaxes) the active profile;
-* chunk.safety_profile is verified against the active profile;
+* the traj kinematic envelope tightens (never relaxes) the active profile;
+* traj.safety_profile is verified against the active profile;
 * workspace_action: reject protective-stops instead of silently clipping;
-* SafetyProfile.validate_chunk / to_config_dict round-trip (the get_safety_profile RPC);
+* SafetyProfile.validate_trajectory / to_config_dict round-trip (the get_safety_profile RPC);
 * blocking gripper, home() with gripper_home_width, go_home_safe;
-* cooperative cancel (request_stop) mid-chunk;
+* cooperative cancel (request_stop) mid-traj;
 * Lease.hold keeps an in-flight RPC's lease alive past the TTL;
 * from_topdown_array / frames_hz constructors; ExecutionResult.summary;
   raise_on_stop.
@@ -25,9 +25,9 @@ import numpy as np
 import pytest
 
 from flexiv_control import (
-    CartesianChunk,
+    CartesianTrajectory,
     CartesianWaypoint,
-    ChunkStoppedError,
+    TrajectoryStoppedError,
     GripperCommand,
     Robot,
     RobotConfig,
@@ -46,12 +46,12 @@ def _robot(**profile_overrides) -> Robot:
     return r
 
 
-def _chunk(positions, duration=0.05, **kwargs) -> CartesianChunk:
+def _traj(positions, duration=0.05, **kwargs) -> CartesianTrajectory:
     wps = [
         CartesianWaypoint(position=np.asarray(p, float), quaternion=None, duration=duration)
         for p in positions
     ]
-    return CartesianChunk(waypoints=wps, **kwargs)
+    return CartesianTrajectory(waypoints=wps, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +85,8 @@ def test_joint_move_duration_derivation():
 def test_execute_chunk_autostarts_cartesian_mode():
     r = _robot()
     # No start_cartesian_impedance() anywhere -- this used to pass on fake and
-    # fault on the first real chunk.
-    res = r.execute_cartesian_chunk(_chunk([[0.45, 0.0, 0.31]]))
+    # fault on the first real traj.
+    res = r.execute_cartesian_trajectory(_traj([[0.45, 0.0, 0.31]]))
     assert res.success
     assert res.log.get("mode_autostarted") is True
     from flexiv_control.types import ControlMode
@@ -108,14 +108,14 @@ def test_fake_backend_rejects_streaming_in_idle():
 def test_chunk_speed_cap_tightens_profile():
     r = _robot()
     target = [[0.55, 0.0, 0.30]]  # 10 cm from the fake start pose
-    slow = r.execute_cartesian_chunk(_chunk(target, duration=0.05, max_tcp_linear_speed=0.02))
+    slow = r.execute_cartesian_trajectory(_traj(target, duration=0.05, max_tcp_linear_speed=0.02))
     n_slow = len(r.backend.cartesian_log)
     r.backend.cartesian_log.clear()
     r2 = _robot()
-    fast = r2.execute_cartesian_chunk(_chunk(target, duration=0.05, max_tcp_linear_speed=10.0))
+    fast = r2.execute_cartesian_trajectory(_traj(target, duration=0.05, max_tcp_linear_speed=10.0))
     n_fast = len(r2.backend.cartesian_log)
     assert slow.success and fast.success
-    # the chunk's lower cap stretches the segment to many more ticks; the
+    # the traj's lower cap stretches the segment to many more ticks; the
     # higher-than-profile cap is clamped to the profile (never relaxed)
     assert n_slow > 4 * n_fast
     assert slow.log["linear_speed_cap"] == pytest.approx(0.02)
@@ -128,14 +128,14 @@ def test_chunk_speed_cap_tightens_profile():
 def test_chunk_profile_mismatch_raises():
     r = _robot()
     with pytest.raises(ValueError, match="safety profile"):
-        r.execute_cartesian_chunk(_chunk([[0.45, 0.0, 0.31]], safety_profile="free_space_fast"))
+        r.execute_cartesian_trajectory(_traj([[0.45, 0.0, 0.31]], safety_profile="free_space_fast"))
 
 
 def test_chunk_profile_match_and_empty_ok():
     r = _robot()
-    ok1 = r.execute_cartesian_chunk(_chunk([[0.45, 0.0, 0.31]], safety_profile=""))
-    ok2 = r.execute_cartesian_chunk(
-        _chunk([[0.45, 0.0, 0.32]], safety_profile=r.profile.name)
+    ok1 = r.execute_cartesian_trajectory(_traj([[0.45, 0.0, 0.31]], safety_profile=""))
+    ok2 = r.execute_cartesian_trajectory(
+        _traj([[0.45, 0.0, 0.32]], safety_profile=r.profile.name)
     )
     assert ok1.success and ok2.success
     assert ok2.log["requested_profile"] == r.profile.name
@@ -143,30 +143,30 @@ def test_chunk_profile_match_and_empty_ok():
 
 
 # ---------------------------------------------------------------------------
-# workspace reject + validate_chunk + profile round-trip
+# workspace reject + validate_trajectory + profile round-trip
 # ---------------------------------------------------------------------------
 def test_workspace_reject_stops_instead_of_clipping():
     r = _robot(workspace_action="reject")
-    res = r.execute_cartesian_chunk(_chunk([[5.0, 0.0, 0.31]]))
+    res = r.execute_cartesian_trajectory(_traj([[5.0, 0.0, 0.31]]))
     assert not res.success
     assert res.stop_reason == "workspace_limit"
 
 
 def test_workspace_clip_default_still_clips():
     r = _robot()
-    res = r.execute_cartesian_chunk(_chunk([[5.0, 0.0, 0.31]]))
+    res = r.execute_cartesian_trajectory(_traj([[5.0, 0.0, 0.31]]))
     assert res.success
     assert res.clipped
 
 
 def test_validate_chunk_lists_violations():
     p = SafetyProfile()
-    chunk = _chunk([[0.45, 0.0, 0.31], [5.0, 0.0, 0.31]], duration=1.0)
-    problems = p.validate_chunk(chunk)
+    traj = _traj([[0.45, 0.0, 0.31], [5.0, 0.0, 0.31]], duration=1.0)
+    problems = p.validate_trajectory(traj)
     assert any("waypoint 1" in m and "outside" in m for m in problems)
     # the 4.55 m hop in 1 s also gets a time-stretch note
     assert any("time-stretched" in m for m in problems)
-    assert p.validate_chunk(_chunk([[0.45, 0.0, 0.31]])) == []
+    assert p.validate_trajectory(_traj([[0.45, 0.0, 0.31]])) == []
 
 
 def test_profile_config_roundtrip():
@@ -230,11 +230,11 @@ def test_go_home_safe_explicit_targets():
 # ---------------------------------------------------------------------------
 def test_request_stop_cancels_mid_chunk():
     r = _robot()
-    chunk = _chunk([[0.55, 0.0, 0.30]], duration=3.0)
+    traj = _traj([[0.55, 0.0, 0.30]], duration=3.0)
     done: dict = {}
 
     def _run():
-        done["result"] = r.execute_cartesian_chunk(chunk)
+        done["result"] = r.execute_cartesian_trajectory(traj)
 
     t = threading.Thread(target=_run)
     t.start()
@@ -249,17 +249,17 @@ def test_request_stop_cancels_mid_chunk():
 
 
 def test_pending_cancel_aborts_next_chunk():
-    """A stop issued between chunks must not be silently erased: the next
-    chunk aborts at entry (consume-on-abort) instead of running."""
+    """A stop issued between trajs must not be silently erased: the next
+    traj aborts at entry (consume-on-abort) instead of running."""
     r = _robot()
     r.request_stop()
-    res = r.execute_cartesian_chunk(_chunk([[0.55, 0.0, 0.30]], duration=1.0))
+    res = r.execute_cartesian_trajectory(_traj([[0.55, 0.0, 0.30]], duration=1.0))
     assert not res.success
     assert res.stop_reason == "user"
     assert res.log.get("aborted_at_entry") is True
     assert len(r.backend.cartesian_log) == 0  # nothing was streamed
-    # the cancel was consumed: the following chunk runs normally
-    ok = r.execute_cartesian_chunk(_chunk([[0.46, 0.0, 0.30]]))
+    # the cancel was consumed: the following traj runs normally
+    ok = r.execute_cartesian_trajectory(_traj([[0.46, 0.0, 0.30]]))
     assert ok.success
 
 
@@ -273,12 +273,12 @@ def test_backend_fault_stops_chunk():
 
 def test_record_trajectory_and_stopped_at_waypoint():
     r = _robot()
-    res = r.execute_cartesian_chunk(_chunk([[0.46, 0.0, 0.30]], duration=0.1), record=True)
+    res = r.execute_cartesian_trajectory(_traj([[0.46, 0.0, 0.30]], duration=0.1), record=True)
     traj = res.log.get("trajectory")
     assert traj and len(traj[0]) == 1 + 7 + 7 + 6  # t + pose_cmd + pose_meas + wrench
     r2 = _robot(workspace_action="reject")
-    bad = r2.execute_cartesian_chunk(
-        _chunk([[0.46, 0.0, 0.30], [5.0, 0.0, 0.30]], duration=0.1)
+    bad = r2.execute_cartesian_trajectory(
+        _traj([[0.46, 0.0, 0.30], [5.0, 0.0, 0.30]], duration=0.1)
     )
     assert not bad.success
     assert bad.log.get("stopped_at_waypoint") == 1
@@ -287,9 +287,9 @@ def test_record_trajectory_and_stopped_at_waypoint():
 def test_frames_hz_must_be_positive():
     u = [[0.5, 0.0, 0.2, 1.0, 24]]
     with pytest.raises(ValueError, match="frames_hz"):
-        CartesianChunk.from_waypoint_array(u, frames_hz=0.0)
+        CartesianTrajectory.from_waypoint_array(u, frames_hz=0.0)
     with pytest.raises(ValueError, match="frames_hz"):
-        CartesianChunk.from_topdown_array([[0.5, 0.0, 0.2, 0.0, 1.0, 24]], frames_hz=-1.0)
+        CartesianTrajectory.from_topdown_array([[0.5, 0.0, 0.2, 0.0, 1.0, 24]], frames_hz=-1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -322,32 +322,32 @@ def test_lease_expires_without_hold():
 def test_from_topdown_array_composes_yaw():
     yaw = 0.7
     u = [[0.5, 0.1, 0.2, yaw, 1.0, 20]]
-    chunk = CartesianChunk.from_topdown_array(u, gripper_span=0.10)
+    traj = CartesianTrajectory.from_topdown_array(u, gripper_span=0.10)
     expected = T.top_down_quat(yaw)
-    np.testing.assert_allclose(chunk.waypoints[0].quaternion, expected, atol=1e-9)
-    assert chunk.waypoints[0].gripper.width == pytest.approx(0.10)
+    np.testing.assert_allclose(traj.waypoints[0].quaternion, expected, atol=1e-9)
+    assert traj.waypoints[0].gripper.width == pytest.approx(0.10)
 
 
 def test_frames_hz_converts_to_duration():
     u = [[0.5, 0.0, 0.2, 1.0, 24]]
-    chunk = CartesianChunk.from_waypoint_array(u, frames_hz=12.0)
-    assert chunk.waypoints[0].duration == pytest.approx(2.0)
-    assert chunk.waypoints[0].n_frames is None
-    td = CartesianChunk.from_topdown_array([[0.5, 0.0, 0.2, 0.0, 1.0, 24]], frames_hz=12.0)
+    traj = CartesianTrajectory.from_waypoint_array(u, frames_hz=12.0)
+    assert traj.waypoints[0].duration == pytest.approx(2.0)
+    assert traj.waypoints[0].n_frames is None
+    td = CartesianTrajectory.from_topdown_array([[0.5, 0.0, 0.2, 0.0, 1.0, 24]], frames_hz=12.0)
     assert td.waypoints[0].duration == pytest.approx(2.0)
 
 
 def test_execution_result_summary():
     r = _robot()
-    res = r.execute_cartesian_chunk(_chunk([[0.45, 0.0, 0.31]]))
+    res = r.execute_cartesian_trajectory(_traj([[0.45, 0.0, 0.31]]))
     s = res.summary()
     assert "ok" in s and "stop=none" in s and "grip=" in s
 
 
 def test_raise_on_stop():
     r = _robot(workspace_action="reject")
-    with pytest.raises(ChunkStoppedError) as ei:
-        r.execute_cartesian_chunk(_chunk([[5.0, 0.0, 0.31]]), raise_on_stop=True)
+    with pytest.raises(TrajectoryStoppedError) as ei:
+        r.execute_cartesian_trajectory(_traj([[5.0, 0.0, 0.31]]), raise_on_stop=True)
     assert ei.value.result.stop_reason == "workspace_limit"
 
 
@@ -367,4 +367,4 @@ def test_actahead_lab_profile_is_pickplace_envelope():
     p = load_safety_profile("actahead_lab")
     assert p.workspace_action == "reject"
     assert p.ws_x[1] >= 0.95 - 1e-9   # covers the lab scene at x ~ 0.78
-    assert p.max_linear_speed >= 0.12  # planner chunk caps bind, not the profile
+    assert p.max_linear_speed >= 0.12  # planner traj caps bind, not the profile

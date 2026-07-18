@@ -1,7 +1,7 @@
 """Numpy-only tests for the intended-motion preview math (no viser needed).
 
 The load-bearing property: the preview IS the executor's command stream. If
-``Robot.execute_cartesian_chunk`` ever changes its resolution/cap/interpolation
+``Robot.execute_cartesian_trajectory`` ever changes its resolution/cap/interpolation
 logic without the preview following, the equality test here fails -- the
 preview must never lie about what the robot will do.
 """
@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from flexiv_control import (
-    CartesianChunk,
+    CartesianTrajectory,
     CartesianWaypoint,
     GripperCommand,
     Robot,
@@ -21,7 +21,7 @@ from flexiv_control import (
 )
 from flexiv_control.viz.preview import (
     effective_caps,
-    plan_chunk_preview,
+    plan_trajectory_preview,
     pose_distance,
     time_colors,
     trail_segments,
@@ -29,7 +29,7 @@ from flexiv_control.viz.preview import (
 )
 
 
-def _chunk(extra_kwargs=None, gripper=True):
+def _traj(extra_kwargs=None, gripper=True):
     wps = [
         CartesianWaypoint(
             position=[0.50, 0.02, 0.30],
@@ -44,22 +44,22 @@ def _chunk(extra_kwargs=None, gripper=True):
             duration=0.6,
         ),
     ]
-    return CartesianChunk(waypoints=wps, **(extra_kwargs or {}))
+    return CartesianTrajectory(waypoints=wps, **(extra_kwargs or {}))
 
 
 def test_preview_equals_executed_command_stream():
     """The headline guarantee: preview setpoints == what the executor streams.
 
-    The fake backend records every commanded pose; for an in-spec chunk the
+    The fake backend records every commanded pose; for an in-spec traj the
     safety filter is a no-op by design, so the executed log must equal the
     preview's per-tick poses exactly."""
     r = Robot(RobotConfig(backend="fake"))
     r.connect()
     r.acquire_lease("t")
     start = r.get_state()
-    chunk = _chunk({"max_tcp_linear_speed": 0.12})
-    pv = plan_chunk_preview(chunk, start.tcp_pose, r.profile, control_hz=r.control_hz)
-    result = r.execute_cartesian_chunk(chunk)
+    traj = _traj({"max_tcp_linear_speed": 0.12})
+    pv = plan_trajectory_preview(traj, start.tcp_pose, r.profile, control_hz=r.control_hz)
+    result = r.execute_cartesian_trajectory(traj)
     assert result.success
     executed = np.asarray(r.backend.cartesian_log, float)
     assert executed.shape == pv.setpoints.shape
@@ -68,21 +68,21 @@ def test_preview_equals_executed_command_stream():
 
 def test_effective_caps_tightening_only():
     p = SafetyProfile()  # 0.25 m/s, 0.60 rad/s
-    lin, ang = effective_caps(_chunk({"max_tcp_linear_speed": 0.12}), p)
-    assert lin == pytest.approx(0.12)            # chunk tightens
-    lin, ang = effective_caps(_chunk({"max_tcp_linear_speed": 10.0}), p)
+    lin, ang = effective_caps(_traj({"max_tcp_linear_speed": 0.12}), p)
+    assert lin == pytest.approx(0.12)            # traj tightens
+    lin, ang = effective_caps(_traj({"max_tcp_linear_speed": 10.0}), p)
     assert lin == pytest.approx(0.25)            # profile is never relaxed
     assert ang == pytest.approx(0.60)
 
 
 def test_preview_reports_time_stretch():
     p = SafetyProfile()
-    fast = CartesianChunk(
+    fast = CartesianTrajectory(
         waypoints=[CartesianWaypoint(position=[0.95, 0.0, 0.30], quaternion=None,
                                      duration=0.1)],
         max_tcp_linear_speed=0.05,
     )
-    pv = plan_chunk_preview(fast, np.array([0.45, 0, 0.3, 1, 0, 0, 0], float), p)
+    pv = plan_trajectory_preview(fast, np.array([0.45, 0, 0.3, 1, 0, 0, 0], float), p)
     assert pv.time_stretched
     assert pv.duration_s > pv.nominal_duration_s
     # the 50 cm hop also violates the workspace box -> annotated
@@ -90,8 +90,8 @@ def test_preview_reports_time_stretch():
 
 
 def test_gripper_events_and_polarity():
-    pv = plan_chunk_preview(
-        _chunk(), np.array([0.45, 0, 0.3, 1, 0, 0, 0], float), None
+    pv = plan_trajectory_preview(
+        _traj(), np.array([0.45, 0, 0.3, 1, 0, 0, 0], float), None
     )
     assert len(pv.gripper_events) == 2
     assert pv.gripper_events[0].closing is True      # grasp = closing

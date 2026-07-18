@@ -15,7 +15,7 @@ the part that matters and is transport-independent; swapping in ZMQ later is a
 localized change.
 
 This module also defines the (de)serialization for the few structured objects
-that cross the wire -- :class:`RobotState`, :class:`CartesianChunk`,
+that cross the wire -- :class:`RobotState`, :class:`CartesianTrajectory`,
 :class:`ExecutionResult`, :class:`GripperCommand` -- so neither the server nor
 the client hand-rolls it.
 """
@@ -27,12 +27,12 @@ from typing import Any, Optional
 
 import numpy as np
 
-from ..action_chunk import (
-    CartesianChunk,
+from ..trajectory import (
+    CartesianTrajectory,
     CartesianWaypoint,
-    ChunkRepresentation,
+    TrajectoryRepresentation,
     ExecutionResult,
-    JointChunk,
+    JointTrajectory,
     JointWaypoint,
 )
 from ..types import (
@@ -177,9 +177,9 @@ def result_from_dict(d: dict) -> ExecutionResult:
 
 
 # ---------------------------------------------------------------------------
-# CartesianChunk
+# CartesianTrajectory
 # ---------------------------------------------------------------------------
-def chunk_to_dict(c: CartesianChunk) -> dict:
+def trajectory_to_dict(c: CartesianTrajectory) -> dict:
     return {
         "waypoints": [
             {
@@ -223,7 +223,7 @@ def chunk_to_dict(c: CartesianChunk) -> dict:
     }
 
 
-def chunk_from_dict(d: dict) -> CartesianChunk:
+def trajectory_from_dict(d: dict) -> CartesianTrajectory:
     wpts = [
         CartesianWaypoint(
             position=np.asarray(w["position"], float),
@@ -254,7 +254,7 @@ def chunk_from_dict(d: dict) -> CartesianChunk:
         if fc
         else None
     )
-    return CartesianChunk(
+    return CartesianTrajectory(
         waypoints=wpts,
         impedance=impedance,
         force_control=force_control,
@@ -271,15 +271,15 @@ def chunk_from_dict(d: dict) -> CartesianChunk:
         grip_tracking_gate_m=d.get("grip_tracking_gate_m"),
         safety_profile=d.get("safety_profile", ""),
         frame=d.get("frame", "base"),
-        representation=ChunkRepresentation(d.get("representation", "absolute")),
+        representation=TrajectoryRepresentation(d.get("representation", "absolute")),
         n_execute=d.get("n_execute"),
     )
 
 
 # ---------------------------------------------------------------------------
-# JointChunk
+# JointTrajectory
 # ---------------------------------------------------------------------------
-def joint_chunk_to_dict(c: JointChunk) -> dict:
+def joint_trajectory_to_dict(c: JointTrajectory) -> dict:
     return {
         "waypoints": [
             {
@@ -294,7 +294,7 @@ def joint_chunk_to_dict(c: JointChunk) -> dict:
     }
 
 
-def joint_chunk_from_dict(d: dict) -> JointChunk:
+def joint_trajectory_from_dict(d: dict) -> JointTrajectory:
     wpts = [
         JointWaypoint(
             positions=np.asarray(w["positions"], float),
@@ -303,7 +303,7 @@ def joint_chunk_from_dict(d: dict) -> JointChunk:
         )
         for w in d["waypoints"]
     ]
-    return JointChunk(
+    return JointTrajectory(
         waypoints=wpts,
         max_joint_speed_scale=float(d.get("max_joint_speed_scale", 0.3)),
         safety_profile=d.get("safety_profile", ""),

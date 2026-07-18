@@ -185,9 +185,9 @@ class FlexivControlServer:
         slip past once installed. This is the single-writer invariant, enforced.
 
         When an ``owner`` is given, the lease is additionally HELD for the whole
-        op: a multi-second chunk outlives the lease TTL (the client heartbeat
+        op: a multi-second traj outlives the lease TTL (the client heartbeat
         shares the blocked socket), and without the hold the lease would expire
-        mid-chunk and be stealable by the next client.
+        mid-traj and be stealable by the next client.
         """
         with self._robot_lock:
             if self._servo_loop is not None:
@@ -215,8 +215,8 @@ class FlexivControlServer:
             "start_joint_impedance": self._h_start_joint_impedance,
             "servo_cartesian_delta": self._h_servo_cartesian_delta,
             "servo_cartesian_pose": self._h_servo_cartesian_pose,
-            "execute_cartesian_chunk": self._h_execute_cartesian_chunk,
-            "execute_joint_chunk": self._h_execute_joint_chunk,
+            "execute_cartesian_trajectory": self._h_execute_cartesian_trajectory,
+            "execute_joint_trajectory": self._h_execute_joint_trajectory,
             "move_joint": self._h_move_joint,
             "command_gripper": self._h_command_gripper,
             "home": self._h_home,
@@ -236,14 +236,14 @@ class FlexivControlServer:
         info = self.lease.acquire(p.get("owner", ""), force=force)
         # An honest force-steal: if a previous owner was displaced while its
         # motion was in flight, cancel that motion (next tick) -- otherwise the
-        # victim's chunk keeps streaming to completion under the thief's lease.
+        # victim's traj keeps streaming to completion under the thief's lease.
         if force and prev and prev != info.owner:
             self.robot.request_stop()
         elif prev != info.owner:
             # A FRESH owner must not inherit the cancel latched by the
             # previous session (a client disconnect requests a safety stop;
             # with no motion in flight nothing consumes it, and it would
-            # instant-abort the new session's first chunk with
+            # instant-abort the new session's first traj with
             # stop=user dur=0.00 -- observed live).
             self.robot.clear_stop()
         return {"owner": info.owner, "expires_at": info.expires_at}
@@ -272,14 +272,14 @@ class FlexivControlServer:
 
     def _h_get_safety_profile(self, p: dict) -> dict:
         """No lease required: reading the active envelope is how a client
-        prevalidates chunks against the server's truth instead of duplicating
+        prevalidates trajs against the server's truth instead of duplicating
         workspace constants that then drift."""
         return {"profile": self.robot.profile.to_config_dict()}
 
     def _h_get_state(self, p: dict) -> dict:
-        # Never block on a multi-second chunk just to read state: if the backend
+        # Never block on a multi-second traj just to read state: if the backend
         # lock is busy, serve the executing loop's per-tick snapshot (at most one
-        # tick stale) instead of queueing behind the chunk.
+        # tick stale) instead of queueing behind the traj.
         if self._robot_lock.acquire(blocking=False):
             try:
                 loop = self._servo_loop
@@ -347,18 +347,18 @@ class FlexivControlServer:
             )
         return {"result": P.result_to_dict(r)}
 
-    def _h_execute_cartesian_chunk(self, p: dict) -> dict:
+    def _h_execute_cartesian_trajectory(self, p: dict) -> dict:
         owner = self._require_lease(p)
-        chunk = P.chunk_from_dict(p["chunk"])
+        traj = P.trajectory_from_dict(p["traj"])
         with self._motion_lock(owner):
-            r = self.robot.execute_cartesian_chunk(chunk, blocking=True)
+            r = self.robot.execute_cartesian_trajectory(traj, blocking=True)
         return {"result": P.result_to_dict(r)}
 
-    def _h_execute_joint_chunk(self, p: dict) -> dict:
+    def _h_execute_joint_trajectory(self, p: dict) -> dict:
         owner = self._require_lease(p)
-        chunk = P.joint_chunk_from_dict(p["chunk"])
+        traj = P.joint_trajectory_from_dict(p["traj"])
         with self._motion_lock(owner):
-            r = self.robot.execute_joint_chunk(chunk)
+            r = self.robot.execute_joint_trajectory(traj)
         return {"result": P.result_to_dict(r)}
 
     def _h_move_joint(self, p: dict) -> dict:
@@ -422,11 +422,11 @@ class FlexivControlServer:
 
     def _h_stop(self, p: dict) -> dict:
         # stop does not require the lease -- anyone may e-stop. First request a
-        # cooperative cancel so an in-flight blocking chunk aborts at its next
+        # cooperative cancel so an in-flight blocking traj aborts at its next
         # tick (the executing thread performs the backend stop itself -- we never
         # call into the backend concurrently with its writer). Then tear down the
         # servo loop and stop the backend directly IF the lock is free; if a
-        # chunk holds it, the cancel handles it within one control tick.
+        # traj holds it, the cancel handles it within one control tick.
         self.robot.request_stop()
         if self._robot_lock.acquire(timeout=0.5):
             try:
@@ -441,13 +441,13 @@ class FlexivControlServer:
                 finally:
                     self._robot_lock.release()
             else:
-                # A chunk grabbed the lock between our probes (it may also have
+                # A traj grabbed the lock between our probes (it may also have
                 # consumed the first cancel at its entry-abort check): re-arm
-                # the cancel so the in-flight chunk still aborts within a tick.
+                # the cancel so the in-flight traj still aborts within a tick.
                 self.robot.request_stop()
         else:
-            # Lock busy: an executing chunk will see the cancel at its next
-            # tick. Re-set it in case a chunk entry consumed it racing us.
+            # Lock busy: an executing traj will see the cancel at its next
+            # tick. Re-set it in case a traj entry consumed it racing us.
             self.robot.request_stop()
         return {"stopped": True}
 

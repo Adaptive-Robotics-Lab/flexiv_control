@@ -113,7 +113,7 @@ def _cmd_state(args) -> int:
 
 
 def _cmd_demo(args) -> int:  # noqa: ARG001
-    from .action_chunk import CartesianChunk
+    from .trajectory import CartesianTrajectory
 
     robot = Robot(RobotConfig(backend="fake"))
     with robot:
@@ -122,8 +122,8 @@ def _cmd_demo(args) -> int:  # noqa: ARG001
         u = [[0.45, 0.0, 0.30, 1.0, 20],
              [0.50, 0.05, 0.25, 0.0, 20],
              [0.45, 0.0, 0.30, 1.0, 20]]
-        result = robot.execute_cartesian_chunk(CartesianChunk.from_waypoint_array(u))
-        print("[flexiv-control] demo chunk executed:")
+        result = robot.execute_cartesian_trajectory(CartesianTrajectory.from_waypoint_array(u))
+        print("[flexiv-control] demo traj executed:")
         print("  success            :", result.success)
         print("  clipped            :", result.clipped)
         print("  path_tracking_error:", round(result.path_tracking_error, 5))
@@ -137,7 +137,7 @@ def _cmd_viz(args) -> int:
     Connects READ-ONLY: a monitor must never own the arm, so this uses a bare
     ``RemoteRobot.connect()`` (no lease) -- ``get_state``/``get_safety_profile``
     are lease-free by design and are served from per-tick snapshots, so the
-    mirror never blocks a running chunk."""
+    mirror never blocks a running traj."""
     try:
         from .viz import RobotViz
         from .viz import assets as viz_assets

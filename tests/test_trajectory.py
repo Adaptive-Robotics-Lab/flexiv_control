@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from flexiv_control import CartesianChunk, CartesianDelta, CartesianWaypoint, ExecutionResult
+from flexiv_control import CartesianTrajectory, CartesianDelta, CartesianWaypoint, ExecutionResult
 
 
 def test_waypoint_requires_duration_or_frames():
@@ -30,23 +30,23 @@ def test_from_waypoint_array_shape_and_mapping():
             [0.50, 0.05, 0.25, 0.0, 10],
         ]
     )
-    chunk = CartesianChunk.from_waypoint_array(u)
-    assert chunk.horizon == 2
+    traj = CartesianTrajectory.from_waypoint_array(u)
+    assert traj.horizon == 2
     # gripper command width scales with w in [0,1] -> [0, 0.08]
-    assert chunk.waypoints[0].gripper.width == pytest.approx(0.08)
-    assert chunk.waypoints[1].gripper.width == pytest.approx(0.0)
+    assert traj.waypoints[0].gripper.width == pytest.approx(0.08)
+    assert traj.waypoints[1].gripper.width == pytest.approx(0.0)
     # n_frames preserved as integers
-    assert chunk.waypoints[0].n_frames == 20
-    assert chunk.waypoints[1].n_frames == 10
+    assert traj.waypoints[0].n_frames == 20
+    assert traj.waypoints[1].n_frames == 10
     # orientation held
-    assert chunk.waypoints[0].quaternion is None
+    assert traj.waypoints[0].quaternion is None
     # total duration at 100 Hz = (20+10)/100
-    assert chunk.total_duration(100.0) == pytest.approx(0.30)
+    assert traj.total_duration(100.0) == pytest.approx(0.30)
 
 
 def test_from_waypoint_array_rejects_bad_shape():
     with pytest.raises(ValueError):
-        CartesianChunk.from_waypoint_array(np.zeros((3, 4)))
+        CartesianTrajectory.from_waypoint_array(np.zeros((3, 4)))
 
 
 def test_cartesian_delta_shape():

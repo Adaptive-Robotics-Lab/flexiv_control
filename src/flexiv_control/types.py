@@ -246,7 +246,7 @@ class GripperCommand:
         """Build from a signed action in ``[-1, 1]`` (the RL/teleop convention):
         ``+1`` = open, ``-1`` = closed, and a *negative* action also selects grasp
         (move-until-contact). This is the ``[-1, 1] -> [0, 1]`` mirror of
-        :meth:`from_normalized`, so the delta-action surface and the chunk surface
+        :meth:`from_normalized`, so the delta-action surface and the traj surface
         share one gripper encoding instead of each rolling its own remap.
         """
         a = float(np.clip(action, -1.0, 1.0))

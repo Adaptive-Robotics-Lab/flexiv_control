@@ -5,7 +5,7 @@ same object. They never touch a backend, ROS topic, or RDK struct directly.
 
 Design notes
 ------------
-* ``execute_cartesian_chunk`` expands the chunk to setpoints, runs the fixed-rate
+* ``execute_cartesian_trajectory`` expands the traj to setpoints, runs the fixed-rate
   loop in Python (the "NRT / modest-rate" tier), applies the safety filter every
   tick, and returns an :class:`ExecutionResult` -- which is what turns a planner's
   "execution" failure category into real numbers.
@@ -24,19 +24,19 @@ from typing import Optional
 
 import numpy as np
 
-from .action_chunk import (
-    CartesianChunk,
+from .trajectory import (
+    CartesianTrajectory,
     CartesianDelta,
     CartesianWaypoint,
     ExecutionResult,
-    JointChunk,
+    JointTrajectory,
     JointWaypoint,
 )
 from .backends import RobotBackend, get_backend
 from .config import RobotConfig, load_safety_profile
 from .interpolation import (
-    CartesianChunkInterpolator,
-    JointChunkInterpolator,
+    CartesianTrajectoryInterpolator,
+    JointTrajectoryInterpolator,
     delta_to_target_pose,
 )
 from .safety import SafetyFilter, SafetyProfile
@@ -51,7 +51,7 @@ from .types import (
 )
 
 # Settle window for the deferred gripper-close tracking gate (see
-# execute_cartesian_chunk): at a segment boundary the arm still trails its
+# execute_cartesian_trajectory): at a segment boundary the arm still trails its
 # command by its normal dynamic lag (~15-25 mm at transit speed on a Rizon),
 # so the gate must not sample there. After this long holding one commanded
 # pose, a healthy arm has converged to a few mm while a contact-stalled arm
@@ -64,13 +64,13 @@ class LeaseError(RuntimeError):
     pass
 
 
-class ChunkStoppedError(RuntimeError):
-    """Raised by ``execute_*_chunk(..., raise_on_stop=True)`` when the safety
-    filter (or a cancel request) aborted the chunk. Carries the full
+class TrajectoryStoppedError(RuntimeError):
+    """Raised by ``execute_*_traj(..., raise_on_stop=True)`` when the safety
+    filter (or a cancel request) aborted the traj. Carries the full
     :class:`ExecutionResult` so the caller can inspect what happened."""
 
     def __init__(self, result: ExecutionResult):
-        super().__init__(f"chunk stopped: {result.summary()}")
+        super().__init__(f"traj stopped: {result.summary()}")
         self.result = result
 
 
@@ -92,10 +92,10 @@ class Robot:
         )
         self.filter = SafetyFilter(self.profile, self.dt)
         # Cooperative cancel: another thread (e.g. the server's stop handler)
-        # sets this and the executing chunk loop aborts at its next tick.
+        # sets this and the executing traj loop aborts at its next tick.
         self._cancel = threading.Event()
         # Last state read from the backend -- a cheap, lock-free snapshot the
-        # server can serve while a blocking chunk owns the backend.
+        # server can serve while a blocking traj owns the backend.
         self._last_state: Optional[RobotState] = None
 
     def _backend_kwargs(self) -> dict:
@@ -107,7 +107,7 @@ class Robot:
             return dict(
                 model_path=self.cfg.model_path,
                 n_joints=self.cfg.n_joints,
-                # Default the sim substep to the control period so a chunk plays
+                # Default the sim substep to the control period so a traj plays
                 # back at the same speed it is streamed; honour an explicit override.
                 control_dt=self.cfg.control_dt if self.cfg.control_dt is not None else self.dt,
                 tcp_site=self.cfg.mujoco_tcp_site,
@@ -169,9 +169,9 @@ class Robot:
     def peek_state(self) -> Optional[RobotState]:
         """Latest state already read from the backend, without touching it.
 
-        During a blocking chunk the execute loop refreshes this every tick, so
-        the server can answer ``get_state`` mid-chunk (at most one tick stale)
-        instead of blocking on the backend lock for the chunk's whole duration.
+        During a blocking traj the execute loop refreshes this every tick, so
+        the server can answer ``get_state`` mid-traj (at most one tick stale)
+        instead of blocking on the backend lock for the traj's whole duration.
         """
         return self._last_state
 
@@ -227,9 +227,9 @@ class Robot:
             position=target[:3], quaternion=target[3:7],
             gripper=delta.gripper, duration=delta.duration, frame=delta.frame,
         )
-        chunk = CartesianChunk(waypoints=[wp], frame=delta.frame,
+        traj = CartesianTrajectory(waypoints=[wp], frame=delta.frame,
                                safety_profile=self.profile.name)
-        return self.execute_cartesian_chunk(chunk, blocking=True)
+        return self.execute_cartesian_trajectory(traj, blocking=True)
 
     def servo_cartesian_pose(
         self, pose: np.ndarray, *, duration: float = 0.2,
@@ -238,56 +238,56 @@ class Robot:
         pose = np.asarray(pose, float).reshape(7)
         wp = CartesianWaypoint(position=pose[:3], quaternion=pose[3:7],
                                gripper=gripper, duration=duration)
-        return self.execute_cartesian_chunk(
-            CartesianChunk(waypoints=[wp], safety_profile=self.profile.name), blocking=True
+        return self.execute_cartesian_trajectory(
+            CartesianTrajectory(waypoints=[wp], safety_profile=self.profile.name), blocking=True
         )
 
-    # -- planner chunk / MPC-horizon / scripted manipulation ---------------
-    def _verify_chunk_profile(self, requested: str, result: ExecutionResult) -> None:
-        """Enforce the reproducibility contract on ``chunk.safety_profile``.
+    # -- planner traj / MPC-horizon / scripted manipulation ---------------
+    def _verify_trajectory_profile(self, requested: str, result: ExecutionResult) -> None:
+        """Enforce the reproducibility contract on ``traj.safety_profile``.
 
         Empty = "run under whatever is active". A non-empty name must match the
         active profile, else we raise: silently executing under a different
-        envelope than the one the chunk was planned for is exactly the failure
+        envelope than the one the traj was planned for is exactly the failure
         the field exists to prevent. Requested/active are always logged.
         """
         result.log["requested_profile"] = requested
         result.log["active_profile"] = self.profile.name
         if requested and requested != self.profile.name:
             raise ValueError(
-                f"chunk requests safety profile {requested!r} but the active "
+                f"traj requests safety profile {requested!r} but the active "
                 f"profile is {self.profile.name!r}; call set_safety_profile"
-                f"({requested!r}) first or fix the chunk"
+                f"({requested!r}) first or fix the traj"
             )
 
-    def execute_cartesian_chunk(
+    def execute_cartesian_trajectory(
         self,
-        chunk: CartesianChunk,
+        traj: CartesianTrajectory,
         *,
         blocking: bool = True,
         raise_on_stop: bool = False,
         record: bool = False,
     ) -> ExecutionResult:
-        """Execute a Cartesian chunk at the control rate with per-tick safety.
+        """Execute a Cartesian traj at the control rate with per-tick safety.
 
         Returns an :class:`ExecutionResult` with tracking error, clipping, stop
         reason, and peak quantities -- the observable signal a planner can log
         under its "execution" failure category.
 
         * If the backend is not already in a Cartesian motion mode, the NRT
-          Cartesian impedance mode is started automatically with the chunk's
+          Cartesian impedance mode is started automatically with the traj's
           ``impedance`` (the documented examples call
           ``start_cartesian_impedance()`` explicitly; forgetting it must not be
           a hardware-only failure).
-        * The chunk's kinematic/contact envelope tightens the active profile:
-          the interpolator runs at ``min(chunk cap, profile cap)`` and the
+        * The traj's kinematic/contact envelope tightens the active profile:
+          the interpolator runs at ``min(traj cap, profile cap)`` and the
           contact check at the elementwise minimum wrench.
-        * A non-empty ``chunk.safety_profile`` must match the active profile.
+        * A non-empty ``traj.safety_profile`` must match the active profile.
         * ``blocking`` is currently always True (kept for future async parity);
-          a concurrent ``stop()``/``request_stop()`` cancels mid-chunk. A cancel
-          that is already pending at entry aborts THIS chunk immediately (a stop
-          issued between chunks must not be silently erased by the next one).
-        * ``raise_on_stop=True`` raises :class:`ChunkStoppedError` instead of
+          a concurrent ``stop()``/``request_stop()`` cancels mid-traj. A cancel
+          that is already pending at entry aborts THIS traj immediately (a stop
+          issued between trajs must not be silently erased by the next one).
+        * ``raise_on_stop=True`` raises :class:`TrajectoryStoppedError` instead of
           returning a failed result, so a protective stop cannot be ignored.
         * ``record=True`` fills ``result.log["trajectory"]`` with per-tick rows
           ``[t, *pose_cmd, *pose_meas, *wrench]`` and sets
@@ -304,46 +304,46 @@ class Robot:
             result.log["aborted_at_entry"] = True
             result.final_state = self.get_state()
             if raise_on_stop:
-                raise ChunkStoppedError(result)
+                raise TrajectoryStoppedError(result)
             return result
-        self._verify_chunk_profile(chunk.safety_profile, result)
+        self._verify_trajectory_profile(traj.safety_profile, result)
 
         start = self.get_state()
         if not start.control_mode.is_cartesian:
-            self.start_cartesian_impedance(impedance=chunk.impedance)
+            self.start_cartesian_impedance(impedance=traj.impedance)
             result.log["mode_autostarted"] = True
             start = self.get_state()
         self.filter.reset(start)
         # Resolve relative-to-start poses against the live start pose and slice to
         # the execution horizon (receding horizon): only the first H_exec waypoints
         # run here; the rest are re-predicted by the planner next cycle.
-        chunk = chunk.for_execution(start.tcp_pose)
-        # Tightening-only envelope: a chunk may slow itself below the profile's
+        traj = traj.for_execution(start.tcp_pose)
+        # Tightening-only envelope: a traj may slow itself below the profile's
         # caps but can never relax them.
         lin_cap = self.profile.max_linear_speed
-        if chunk.max_tcp_linear_speed and chunk.max_tcp_linear_speed > 0:
-            lin_cap = min(lin_cap, float(chunk.max_tcp_linear_speed))
+        if traj.max_tcp_linear_speed and traj.max_tcp_linear_speed > 0:
+            lin_cap = min(lin_cap, float(traj.max_tcp_linear_speed))
         ang_cap = self.profile.max_angular_speed
-        if chunk.max_tcp_angular_speed and chunk.max_tcp_angular_speed > 0:
-            ang_cap = min(ang_cap, float(chunk.max_tcp_angular_speed))
+        if traj.max_tcp_angular_speed and traj.max_tcp_angular_speed > 0:
+            ang_cap = min(ang_cap, float(traj.max_tcp_angular_speed))
         result.log["linear_speed_cap"] = lin_cap
         result.log["angular_speed_cap"] = ang_cap
         wrench_cap = self.profile.max_contact_wrench
         wrench_relaxed = False
-        if chunk.contact_wrench_allowance is not None:
+        if traj.contact_wrench_allowance is not None:
             # Held-payload headroom: server-clamped to the profile's granted
-            # ceiling (default zero), then ADDED to the profile cap. The chunk
+            # ceiling (default zero), then ADDED to the profile cap. The traj
             # request is a request, never an override.
-            allow = np.minimum(chunk.contact_wrench_allowance,
+            allow = np.minimum(traj.contact_wrench_allowance,
                                self.profile.max_wrench_allowance)
             if np.any(allow > 0):
                 wrench_cap = wrench_cap + allow
                 wrench_relaxed = True
                 result.log["contact_wrench_allowance"] = allow.tolist()
-        if chunk.max_contact_wrench is not None:
-            wrench_cap = np.minimum(wrench_cap, chunk.max_contact_wrench)
-        interp = CartesianChunkInterpolator(
-            chunk,
+        if traj.max_contact_wrench is not None:
+            wrench_cap = np.minimum(wrench_cap, traj.max_contact_wrench)
+        interp = CartesianTrajectoryInterpolator(
+            traj,
             start.tcp_pose,
             self.control_hz,
             max_linear_speed=lin_cap,
@@ -380,13 +380,13 @@ class Robot:
             nonlocal close_aborted, close_issued
             err_now = (float(np.linalg.norm(prev_cmd_pos - state.tcp_position))
                        if prev_cmd_pos is not None else 0.0)
-            if close_aborted or result.clipped or err_now > chunk.grip_tracking_gate_m:
+            if close_aborted or result.clipped or err_now > traj.grip_tracking_gate_m:
                 if not close_aborted:
                     close_aborted = True
                     result.log["close_aborted"] = {
                         "segment": interp.current_segment,
                         "tracking_error_m": err_now,
-                        "gate_m": float(chunk.grip_tracking_gate_m),
+                        "gate_m": float(traj.grip_tracking_gate_m),
                         "clipped": bool(result.clipped),
                     }
             else:
@@ -410,7 +410,7 @@ class Robot:
                     result.success = False
                     result.stop_reason = StopReason.BACKEND_FAULT.value
                     break
-                # Per-chunk contact envelope (tightened or payload-relaxed);
+                # Per-traj contact envelope (tightened or payload-relaxed);
                 # the filter below enforces the same effective cap.
                 if np.any(np.abs(state.wrench) > wrench_cap):
                     self.backend.stop()
@@ -426,7 +426,7 @@ class Robot:
                     break
                 if sr.clipped:
                     result.clipped = True
-                self.backend.stream_cartesian(sr.pose, wrench=_chunk_wrench(chunk))
+                self.backend.stream_cartesian(sr.pose, wrench=_traj_wrench(traj))
                 # A deferred close whose settle window elapsed fires (or
                 # aborts) NOW, against the settled tracking error.
                 if pending_close is not None and tick_idx >= pending_close[1]:
@@ -440,7 +440,7 @@ class Robot:
                     # pinch). A CLOSING command is DEFERRED by a settle window
                     # (bounded within its segment) and then fired only if the
                     # settled tracking error is inside the gate; once one close
-                    # aborts, all later closes this chunk abort too (the
+                    # aborts, all later closes this traj abort too (the
                     # follow-up force-grasp would blind-close mid-air). Opens
                     # always pass immediately. A garbage width read (transient
                     # gripper-bus failure returns 0.0) must not misclassify --
@@ -450,13 +450,13 @@ class Robot:
                         float(state.gripper_width) > 1e-6
                         and grip.width < float(state.gripper_width) - 1e-3)
                     # NEVER gate a grasp=True SUSTAIN once a close was actually
-                    # issued this chunk: the object is (potentially) between the
+                    # issued this traj: the object is (potentially) between the
                     # fingers, and skipping the force-closure hand-off leaves
                     # only a stalled position-hold -- the filmed slide-out
                     # failure -- while mislabeling a physical grasp as
                     # "no close fired". The gate exists to prevent closing at an
                     # UNPLANNED height; after a close it has done its job.
-                    gate_active = (chunk.grip_tracking_gate_m is not None
+                    gate_active = (traj.grip_tracking_gate_m is not None
                                    and not (grip.grasp and close_issued))
                     if closing and gate_active:
                         if close_aborted:
@@ -501,8 +501,8 @@ class Robot:
                 if sleep > 0:
                     time.sleep(sleep)
             if pending_close is not None:
-                # The chunk ended inside a settle window (short final segment)
-                # or broke out mid-chunk. On a clean finish resolve the close
+                # The traj ended inside a settle window (short final segment)
+                # or broke out mid-traj. On a clean finish resolve the close
                 # against the final settled state; on a stop the motion is
                 # gone -- record the abort so the caller never mistakes the
                 # untouched OPEN width for an attempted grasp.
@@ -514,16 +514,16 @@ class Robot:
                     close_aborted = True
                     result.log["close_aborted"] = {
                         "segment": interp.current_segment,
-                        "reason": f"chunk_stopped:{result.stop_reason}",
-                        "gate_m": float(chunk.grip_tracking_gate_m),
+                        "reason": f"traj_stopped:{result.stop_reason}",
+                        "gate_m": float(traj.grip_tracking_gate_m),
                         "clipped": bool(result.clipped),
                     }
         finally:
             if wrench_relaxed:
                 # Re-arm the firmware guard with the profile cap no matter how
-                # the chunk ended -- the allowance must never outlive its chunk.
+                # the traj ended -- the allowance must never outlive its traj.
                 # A restore failure (robot faulted at the last tick, comms
-                # hiccup) must not mask the chunk's real result: the next
+                # hiccup) must not mask the traj's real result: the next
                 # set_mode re-arms the firmware with the profile cap anyway,
                 # and the host-side guards always enforce the profile values.
                 try:
@@ -543,7 +543,7 @@ class Robot:
         if not result.success:
             result.log["stopped_at_waypoint"] = interp.current_segment
         if raise_on_stop and not result.success:
-            raise ChunkStoppedError(result)
+            raise TrajectoryStoppedError(result)
         return result
 
     # -- joint space (reset / home / MoveIt-plan execution) ----------------
@@ -586,19 +586,19 @@ class Robot:
             self.get_state().q, q_target, duration=duration, max_joint_speed=max_joint_speed
         )
         self.start_joint_impedance(realtime=realtime)
-        chunk = JointChunk(
+        traj = JointTrajectory(
             waypoints=[JointWaypoint(positions=np.asarray(q_target, float), duration=dur)],
             safety_profile=self.profile.name,
         )
-        return self.execute_joint_chunk(chunk)
+        return self.execute_joint_trajectory(traj)
 
-    def execute_joint_chunk(
-        self, chunk: JointChunk, *, raise_on_stop: bool = False
+    def execute_joint_trajectory(
+        self, traj: JointTrajectory, *, raise_on_stop: bool = False
     ) -> ExecutionResult:
         self._check_lease()
         result = ExecutionResult(success=True)
         if self._cancel.is_set():
-            # A pending stop aborts THIS chunk rather than being silently
+            # A pending stop aborts THIS traj rather than being silently
             # erased (same consume-on-abort semantics as the Cartesian path).
             self._cancel.clear()
             result.success = False
@@ -606,17 +606,17 @@ class Robot:
             result.log["aborted_at_entry"] = True
             result.final_state = self.get_state()
             if raise_on_stop:
-                raise ChunkStoppedError(result)
+                raise TrajectoryStoppedError(result)
             return result
-        self._verify_chunk_profile(chunk.safety_profile, result)
+        self._verify_trajectory_profile(traj.safety_profile, result)
         start = self.get_state()
         if start.control_mode.is_cartesian or start.control_mode == ControlMode.IDLE:
             self.start_joint_impedance()
             result.log["mode_autostarted"] = True
             start = self.get_state()
         self.filter.reset(start)
-        interp = JointChunkInterpolator(
-            chunk,
+        interp = JointTrajectoryInterpolator(
+            traj,
             start.q,
             self.control_hz,
             max_joint_speed=2.0 * self.profile.max_joint_speed_scale,
@@ -658,7 +658,7 @@ class Robot:
                 time.sleep(sleep)
         result.final_state = self.get_state()
         if raise_on_stop and not result.success:
-            raise ChunkStoppedError(result)
+            raise TrajectoryStoppedError(result)
         return result
 
     # -- gripper / home / stop ----------------------------------------------
@@ -670,7 +670,7 @@ class Robot:
         matching ``RemoteRobot.command_gripper``). Without ``wait`` this is
         fire-and-forget (RDK ``Gripper.Move``/``Grasp`` return immediately),
         which is why every consumer that needs "open, then proceed" used to
-        fabricate a do-nothing motion chunk just to ride its blocking executor.
+        fabricate a do-nothing motion traj just to ride its blocking executor.
 
         Settle detection: reaching the commanded width (non-grasp), or width
         unchanged while not moving -- the latter only counts after motion has
@@ -770,7 +770,7 @@ class Robot:
             s = self.get_state()
             target = s.tcp_position.copy()
             target[2] = min(target[2] + float(lift_m), self.profile.ws_z[1])
-            lift_chunk = CartesianChunk(
+            lift_traj = CartesianTrajectory(
                 waypoints=[
                     CartesianWaypoint(
                         position=target,
@@ -780,7 +780,7 @@ class Robot:
                 ],
                 max_tcp_linear_speed=max_tcp_speed,
             )
-            lift_result = self.execute_cartesian_chunk(lift_chunk)
+            lift_result = self.execute_cartesian_trajectory(lift_traj)
             log["lift"] = lift_result.summary()
             contact_abort = lift_result.stop_reason in (
                 StopReason.CONTACT_WRENCH.value,
@@ -821,7 +821,7 @@ class Robot:
         return result
 
     def request_stop(self) -> None:
-        """Cooperative cancel: the executing chunk loop aborts at its next tick
+        """Cooperative cancel: the executing traj loop aborts at its next tick
         (StopReason ``user``). Safe to call from another thread; does not touch
         the backend itself, so it cannot race the executing thread's stream."""
         self._cancel.set()
@@ -832,7 +832,7 @@ class Robot:
         For session boundaries only: a dying client's disconnect handler
         requests a safety stop, and when no motion is in flight nothing
         consumes the latched flag -- it then instant-aborts the NEXT
-        session's first chunk (``stop=user dur=0.00``, observed live). The
+        session's first traj (``stop=user dur=0.00``, observed live). The
         server clears it when a FRESH owner acquires the lease; never call
         this while another party's motion may be in flight."""
         self._cancel.clear()
@@ -842,7 +842,7 @@ class Robot:
         self.backend.stop()
 
 
-def _chunk_wrench(chunk: CartesianChunk):
-    if chunk.force_control is not None and np.any(chunk.force_control.enabled_axes):
-        return chunk.force_control.target_wrench
+def _traj_wrench(traj: CartesianTrajectory):
+    if traj.force_control is not None and np.any(traj.force_control.enabled_axes):
+        return traj.force_control.target_wrench
     return None

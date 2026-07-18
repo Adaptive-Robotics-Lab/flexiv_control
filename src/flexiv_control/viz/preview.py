@@ -1,14 +1,14 @@
-"""Numpy-only planning of what a chunk WILL command -- the intended motion.
+"""Numpy-only planning of what a traj WILL command -- the intended motion.
 
 This module deliberately imports no visualization library so the preview math
 is unit-tested in the core (numpy-only) CI job and can never drift silently
 behind a missing optional dependency.
 
 The one rule that makes the preview trustworthy: it must run the SAME code the
-executor runs. ``plan_chunk_preview`` mirrors ``Robot.execute_cartesian_chunk``
-exactly -- ``chunk.for_execution(start_pose)`` (relative-chunk resolution +
-horizon slicing), tightening-only caps ``min(chunk, active profile)``, and the
-real :class:`~flexiv_control.interpolation.CartesianChunkInterpolator` --
+executor runs. ``plan_trajectory_preview`` mirrors ``Robot.execute_cartesian_trajectory``
+exactly -- ``traj.for_execution(start_pose)`` (relative-traj resolution +
+horizon slicing), tightening-only caps ``min(traj, active profile)``, and the
+real :class:`~flexiv_control.interpolation.CartesianTrajectoryInterpolator` --
 so the rendered path includes time-stretching and is the true per-tick command
 stream, not a naive waypoint lerp. A regression test asserts the preview
 equals the executed command stream on the fake backend.
@@ -22,8 +22,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from .. import transforms as T
-from ..action_chunk import CartesianChunk
-from ..interpolation import CartesianChunkInterpolator
+from ..trajectory import CartesianTrajectory
+from ..interpolation import CartesianTrajectoryInterpolator
 from ..safety import SafetyProfile
 from ..types import GripperCommand
 
@@ -33,15 +33,15 @@ class GripperEvent:
     """A gripper actuation inside the planned stream (latched at the first
     tick of its segment and running concurrently with the motion)."""
 
-    tick: int                 # index into ChunkPreview.setpoints
+    tick: int                 # index into TrajectoryPreview.setpoints
     position: np.ndarray      # TCP position where it fires
     command: GripperCommand
     closing: bool             # True if narrower than the previous width
 
 
 @dataclass
-class ChunkPreview:
-    """Everything a viewer (or a go/no-go gate) needs about an intended chunk."""
+class TrajectoryPreview:
+    """Everything a viewer (or a go/no-go gate) needs about an intended traj."""
 
     setpoints: np.ndarray                 # (N, 7) per-tick poses, w-first quats
     gripper_events: List[GripperEvent] = field(default_factory=list)
@@ -63,32 +63,32 @@ class ChunkPreview:
 
 
 def effective_caps(
-    chunk: CartesianChunk, profile: Optional[SafetyProfile]
+    traj: CartesianTrajectory, profile: Optional[SafetyProfile]
 ) -> Tuple[float, float]:
     """The tightening-only speed caps the executor will enforce:
-    ``min(chunk cap, active profile cap)`` per axis (matching
-    ``Robot.execute_cartesian_chunk``)."""
-    lin = float(chunk.max_tcp_linear_speed) if chunk.max_tcp_linear_speed else float("inf")
-    ang = float(chunk.max_tcp_angular_speed) if chunk.max_tcp_angular_speed else float("inf")
+    ``min(traj cap, active profile cap)`` per axis (matching
+    ``Robot.execute_cartesian_trajectory``)."""
+    lin = float(traj.max_tcp_linear_speed) if traj.max_tcp_linear_speed else float("inf")
+    ang = float(traj.max_tcp_angular_speed) if traj.max_tcp_angular_speed else float("inf")
     if profile is not None:
         lin = min(lin, float(profile.max_linear_speed))
         ang = min(ang, float(profile.max_angular_speed))
     return lin, ang
 
 
-def plan_chunk_preview(
-    chunk: CartesianChunk,
+def plan_trajectory_preview(
+    traj: CartesianTrajectory,
     start_pose: np.ndarray,
     profile: Optional[SafetyProfile] = None,
     *,
     control_hz: float = 100.0,
-) -> ChunkPreview:
-    """Dry-run the chunk into the exact per-tick command stream the executor
+) -> TrajectoryPreview:
+    """Dry-run the traj into the exact per-tick command stream the executor
     would send, plus the annotations an operator needs for a go/no-go call."""
     start_pose = np.asarray(start_pose, float).reshape(7)
-    resolved = chunk.for_execution(start_pose)
+    resolved = traj.for_execution(start_pose)
     lin_cap, ang_cap = effective_caps(resolved, profile)
-    interp = CartesianChunkInterpolator(
+    interp = CartesianTrajectoryInterpolator(
         resolved,
         start_pose,
         control_hz,
@@ -119,8 +119,8 @@ def plan_chunk_preview(
         poses.append(pose)
 
     setpoints = np.asarray(poses, float).reshape(-1, 7)
-    warnings = profile.validate_chunk(resolved) if profile is not None else []
-    return ChunkPreview(
+    warnings = profile.validate_trajectory(resolved) if profile is not None else []
+    return TrajectoryPreview(
         setpoints=setpoints,
         gripper_events=events,
         waypoints=np.asarray([w.position for w in resolved.waypoints], float).reshape(-1, 3),

@@ -66,9 +66,9 @@ class SafetyProfile:
     max_contact_wrench: np.ndarray = field(
         default_factory=lambda: np.array([40, 40, 40, 5, 5, 5], float)
     )
-    # Ceiling on the per-chunk ``contact_wrench_allowance`` a client may
+    # Ceiling on the per-traj ``contact_wrench_allowance`` a client may
     # request on top of ``max_contact_wrench`` (held-payload transport).
-    # Default ZERO: no chunk can relax the contact guard unless this
+    # Default ZERO: no traj can relax the contact guard unless this
     # deployment's safety YAML explicitly grants headroom (``contact:
     # max_allowance``). The server clamps requests to this, so a runaway
     # client cannot disable collision stopping.
@@ -169,14 +169,14 @@ class SafetyProfile:
             },
         }
 
-    def validate_chunk(self, chunk) -> list:
-        """Client-side preflight: list every violation a chunk would hit.
+    def validate_trajectory(self, traj) -> list:
+        """Client-side preflight: list every violation a traj would hit.
 
-        Returns a list of human-readable strings, empty when the chunk is clean.
+        Returns a list of human-readable strings, empty when the traj is clean.
         Workspace violations are hard errors (the filter would clip or reject
         them); speed notes flag segments the interpolator would time-stretch, so
         the caller's wall-clock estimate can account for it. This is the helper
-        a planner should call BEFORE sending a chunk, instead of duplicating the
+        a planner should call BEFORE sending a traj, instead of duplicating the
         profile's workspace box in its own constants.
         """
         import math
@@ -187,12 +187,12 @@ class SafetyProfile:
         lin_cap = self.max_linear_speed
         ang_cap = self.max_angular_speed
         try:
-            chunk_lin = float(getattr(chunk, "max_tcp_linear_speed", 0.0))
-            if chunk_lin > 0:
-                lin_cap = min(lin_cap, chunk_lin)
-            chunk_ang = float(getattr(chunk, "max_tcp_angular_speed", 0.0))
-            if chunk_ang > 0:
-                ang_cap = min(ang_cap, chunk_ang)
+            traj_lin = float(getattr(traj, "max_tcp_linear_speed", 0.0))
+            if traj_lin > 0:
+                lin_cap = min(lin_cap, traj_lin)
+            traj_ang = float(getattr(traj, "max_tcp_angular_speed", 0.0))
+            if traj_ang > 0:
+                ang_cap = min(ang_cap, traj_ang)
         except (TypeError, ValueError):
             pass
         # The interpolator stretches on PEAK speed: its cosine blend peaks at
@@ -201,7 +201,7 @@ class SafetyProfile:
         peak = math.pi / 2.0
         prev = None
         prev_quat = None
-        for i, w in enumerate(chunk.waypoints):
+        for i, w in enumerate(traj.waypoints):
             pos = np.asarray(w.position, float).reshape(3)
             if np.any(pos < lo) or np.any(pos > hi):
                 problems.append(
@@ -253,7 +253,7 @@ class SafetyFilter:
     setpoint so limits are enforced on the command stream rather than against
     live state (which would fight normal tracking lag and stall a trajectory).
 
-    Call :meth:`reset` at the start of every motion (chunk / servo session / loop
+    Call :meth:`reset` at the start of every motion (traj / servo session / loop
     start) so the first command is referenced to the robot's current pose. For a
     single one-shot ``filter_*`` call with no prior command, the live state is
     used as the reference, which keeps the guard meaningful in unit tests.
@@ -307,7 +307,7 @@ class SafetyFilter:
         reasons: list = []
 
         # 1. Contact wrench: hard stop if exceeded (don't keep pushing). The
-        #    executor passes the chunk-effective cap (profile +- per-chunk
+        #    executor passes the traj-effective cap (profile +- per-traj
         #    tightening/allowance); standalone callers get the profile cap.
         wrench_cap = p.max_contact_wrench if max_contact_wrench is None else max_contact_wrench
         if np.any(np.abs(state.wrench) > wrench_cap):
@@ -350,7 +350,7 @@ class SafetyFilter:
 
         # 4. Speed limit (per tick) against the previous command. With the
         #    interpolator honouring the velocity cap this is a no-op for
-        #    in-spec chunks; for raw servo/MPC setpoints it saturates motion
+        #    in-spec trajs; for raw servo/MPC setpoints it saturates motion
         #    toward the latest target at <= max_linear_speed.
         lin_step = float(np.linalg.norm(target_pose[:3] - ref[:3]))
         if lin_step / max(self.dt, 1e-9) > p.max_linear_speed:

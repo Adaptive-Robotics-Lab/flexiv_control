@@ -10,14 +10,14 @@ This is a community project and is **not affiliated with Flexiv Robotics**.
 
 Quick start (no hardware needed)::
 
-    from flexiv_control import Robot, RobotConfig, CartesianChunk
+    from flexiv_control import Robot, RobotConfig, CartesianTrajectory
 
     robot = Robot(RobotConfig(backend="fake"))
     robot.connect()
     robot.start_cartesian_impedance()
-    chunk = CartesianChunk.from_waypoint_array([[0.45, 0.0, 0.30, 1.0, 20],
+    traj = CartesianTrajectory.from_waypoint_array([[0.45, 0.0, 0.30, 1.0, 20],
                                           [0.50, 0.0, 0.25, 0.0, 20]])
-    result = robot.execute_cartesian_chunk(chunk)
+    result = robot.execute_cartesian_trajectory(traj)
     print(result.success, result.path_tracking_error)
     robot.disconnect()
 """
@@ -39,13 +39,13 @@ from .types import (  # noqa: F401
 )
 
 # --- the action contract
-from .action_chunk import (  # noqa: F401
-    CartesianChunk,
+from .trajectory import (  # noqa: F401
+    CartesianTrajectory,
     CartesianDelta,
     CartesianWaypoint,
-    ChunkRepresentation,
+    TrajectoryRepresentation,
     ExecutionResult,
-    JointChunk,
+    JointTrajectory,
     JointWaypoint,
 )
 
@@ -57,7 +57,7 @@ from .config import RobotConfig, load_safety_profile  # noqa: F401
 from .backends import FakeBackend, RobotBackend, get_backend  # noqa: F401
 
 # --- the one facade
-from .robot import ChunkStoppedError, LeaseError, Robot  # noqa: F401
+from .robot import TrajectoryStoppedError, LeaseError, Robot  # noqa: F401
 
 # --- receding-horizon / VLA policy-server seam
 from .recede import RecedingHorizonRunner, console_confirm  # noqa: F401
@@ -75,12 +75,12 @@ __all__ = [
     "SafetyStatus",
     "StopReason",
     # action contract
-    "CartesianChunk",
+    "CartesianTrajectory",
     "CartesianDelta",
     "CartesianWaypoint",
-    "ChunkRepresentation",
+    "TrajectoryRepresentation",
     "ExecutionResult",
-    "JointChunk",
+    "JointTrajectory",
     "JointWaypoint",
     # safety + config
     "SafetyFilter",
@@ -94,7 +94,7 @@ __all__ = [
     # facade
     "Robot",
     "LeaseError",
-    "ChunkStoppedError",
+    "TrajectoryStoppedError",
     # receding horizon
     "RecedingHorizonRunner",
     "RemotePolicyClient",

@@ -1,6 +1,6 @@
 """MuJoCo backend for sim and real-to-sim-to-real.
 
-The *same* ``CartesianChunk`` / ``CartesianDelta`` action and the *same*
+The *same* ``CartesianTrajectory`` / ``CartesianDelta`` action and the *same*
 ``RobotState`` observation drive sim and the real Rizon behind one backend
 switch -- the Polymetis (pybullet->real) / Deoxys (robosuite->real) sim=real
 property, now realized for Flexiv. Cartesian setpoints are tracked with a

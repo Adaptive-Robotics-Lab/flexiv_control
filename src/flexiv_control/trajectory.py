@@ -18,13 +18,13 @@ duration once you fix a control rate:
 
     duration_j = n_frames_j / control_hz
 
-``CartesianChunk`` below is that object, generalised so it is also exactly what
-an MPC horizon, a robosuite/MuJoCo rollout, or an RL action-chunk needs:
+``CartesianTrajectory`` below is that object, generalised so it is also exactly what
+an MPC horizon, a robosuite/MuJoCo rollout, or an RL action-traj needs:
   * positions become full SE(3) poses (orientation may be *held* -> position-only
-    chunks map in with zero changes),
-  * per-waypoint stiffness/limits so the *same* chunk can describe a free-space
+    trajs map in with zero changes),
+  * per-waypoint stiffness/limits so the *same* traj can describe a free-space
     reach and a contact-rich push,
-  * an explicit ``representation`` (absolute vs relative-to-chunk-start) and a
+  * an explicit ``representation`` (absolute vs relative-to-traj-start) and a
     predict-vs-execute horizon split (``n_execute`` -> ``horizon_exec``), so the
     receding-horizon "predict H_pred, execute H_exec, replan" loop (Diffusion
     Policy Tp/Ta) is first-class rather than implicit,
@@ -55,7 +55,7 @@ class CartesianWaypoint:
 
     Either ``n_frames`` (a per-waypoint frame count) or ``duration`` may be given. The
     interpolator converts ``n_frames`` to a duration using the active control
-    rate, so the same chunk runs identically whether the loop is 100 Hz or
+    rate, so the same traj runs identically whether the loop is 100 Hz or
     1 kHz, as long as ``n_frames`` is interpreted at that rate.
     """
 
@@ -85,16 +85,16 @@ class CartesianWaypoint:
         return float(self.n_frames) / float(control_hz)
 
 
-class ChunkRepresentation(str, Enum):
-    """How the waypoint poses in a chunk are interpreted.
+class TrajectoryRepresentation(str, Enum):
+    """How the waypoint poses in a traj are interpreted.
 
-    * ``ABSOLUTE`` (default): each waypoint is an absolute target in the chunk's
+    * ``ABSOLUTE`` (default): each waypoint is an absolute target in the traj's
       ``frame`` (base by default) -- the ALOHA/DROID convention.
     * ``RELATIVE_TO_START``: each waypoint is a pose *relative to the TCP pose at
-      the start of the chunk* (composed ``T_abs = T_start . T_rel``) -- the
+      the start of the traj* (composed ``T_abs = T_start . T_rel``) -- the
       UMI-style relative-trajectory convention that is robust to base/camera
       calibration drift. It is resolved to absolute at execution time against the
-      live start pose, so a chunk never accumulates sequential step-to-step error.
+      live start pose, so a traj never accumulates sequential step-to-step error.
 
     Which is better is task/setup dependent (UMI favours relative for
     calibration-free in-the-wild use; DROID ships absolute), so this is an
@@ -106,7 +106,7 @@ class ChunkRepresentation(str, Enum):
 
 
 @dataclass
-class CartesianChunk:
+class CartesianTrajectory:
     """A short, bounded sequence of Cartesian waypoints -- the core action type.
 
     Used by a receding-horizon planner (execute first segment, replan), MPC (the first slice of a
@@ -115,12 +115,12 @@ class CartesianChunk:
 
     waypoints: List[CartesianWaypoint]
 
-    # Compliance for the whole chunk (a waypoint may override later if needed).
+    # Compliance for the whole traj (a waypoint may override later if needed).
     impedance: ImpedanceParams = field(default_factory=ImpedanceParams)
     force_control: Optional[ForceControlParams] = None
 
     # Kinematic SPEED envelope. Enforced as TIGHTENING-ONLY at execution: the
-    # interpolator runs at min(chunk cap, active profile cap), so a chunk may
+    # interpolator runs at min(traj cap, active profile cap), so a traj may
     # slow itself below the profile but can never relax the profile's limits.
     max_tcp_linear_speed: float = 0.25    # m/s
     max_tcp_angular_speed: float = 0.60   # rad/s
@@ -130,16 +130,16 @@ class CartesianChunk:
     max_tcp_angular_acc: float = 2.0      # rad/s^2
 
     # Contact envelope (None -> use the safety profile default). Like the speed
-    # caps, applied as min(chunk, profile) -- tightening only.
+    # caps, applied as min(traj, profile) -- tightening only.
     max_contact_wrench: Optional[np.ndarray] = None  # [fx,fy,fz,tx,ty,tz]
 
     # Payload wrench allowance (None -> none). Added ON TOP of the profile's
-    # ``max_contact_wrench`` for this chunk, so a transport of a KNOWN held
+    # ``max_contact_wrench`` for this traj, so a transport of a KNOWN held
     # payload is not stopped by the object's own static wrench (weight +
     # cantilever torque read by the wrist F/T). NOT a client-side override:
     # the server clamps the request to the profile's ``max_wrench_allowance``
     # (default zero -- a deployment must explicitly grant headroom in its
-    # safety YAML before any chunk can relax the contact guard).
+    # safety YAML before any traj can relax the contact guard).
     contact_wrench_allowance: Optional[np.ndarray] = None  # [fx,fy,fz,tx,ty,tz]
 
     # Gripper-close tracking gate (None -> disabled). When set, a CLOSING
@@ -149,7 +149,7 @@ class CartesianChunk:
     # unmodeled contact (impedance deflection below the wrench cap) leaves
     # the tool at an unplanned height, and closing there pinches whatever is
     # under the pads instead of the planned grasp. Once a close is skipped,
-    # every LATER closing command in the chunk is skipped too (the grasp plan
+    # every LATER closing command in the traj is skipped too (the grasp plan
     # is invalid; a follow-up force-grasp would blind-close on air or rim).
     # Opening commands are never gated. Recorded in ``result.log['close_aborted']``.
     grip_tracking_gate_m: Optional[float] = None
@@ -157,25 +157,25 @@ class CartesianChunk:
     # Expected active safety profile (reproducibility contract). Empty string
     # (default) = "execute under whatever profile is active". A non-empty name
     # is VERIFIED at execution: if it does not match the robot's active profile,
-    # ``execute_cartesian_chunk`` raises instead of silently running under a
+    # ``execute_cartesian_trajectory`` raises instead of silently running under a
     # different envelope. The requested and active names are always recorded in
     # ``ExecutionResult.log``.
     safety_profile: str = ""
 
     frame: str = "base"
 
-    # Absolute vs relative-to-chunk-start pose semantics (see ChunkRepresentation).
-    representation: ChunkRepresentation = ChunkRepresentation.ABSOLUTE
+    # Absolute vs relative-to-traj-start pose semantics (see TrajectoryRepresentation).
+    representation: TrajectoryRepresentation = TrajectoryRepresentation.ABSOLUTE
 
-    # Receding-horizon split: the chunk *predicts* len(waypoints) (H_pred) but the
+    # Receding-horizon split: the traj *predicts* len(waypoints) (H_pred) but the
     # robot executes only the first ``n_execute`` (H_exec) before replanning.
-    # None -> execute the whole chunk. Diffusion-Policy reference: predict ~16,
+    # None -> execute the whole traj. Diffusion-Policy reference: predict ~16,
     # execute ~8.
     n_execute: Optional[int] = None
 
     def __post_init__(self) -> None:
         if not self.waypoints:
-            raise ValueError("CartesianChunk needs at least one waypoint")
+            raise ValueError("CartesianTrajectory needs at least one waypoint")
         if self.max_contact_wrench is not None:
             self.max_contact_wrench = np.asarray(self.max_contact_wrench, float).reshape(CART_DOF)
         if self.contact_wrench_allowance is not None:
@@ -204,15 +204,15 @@ class CartesianChunk:
     def total_duration(self, control_hz: float) -> float:
         return sum(w.resolve_duration(control_hz) for w in self.waypoints)
 
-    def resolve_to_absolute(self, start_pose: np.ndarray) -> "CartesianChunk":
-        """Return an ABSOLUTE-representation copy of this chunk.
+    def resolve_to_absolute(self, start_pose: np.ndarray) -> "CartesianTrajectory":
+        """Return an ABSOLUTE-representation copy of this traj.
 
         Identity if already absolute. For ``RELATIVE_TO_START`` each waypoint is
-        composed onto ``start_pose`` (the live TCP pose at chunk start) as
-        ``T_abs = T_start . T_rel`` -- so relative chunks are re-anchored to the
+        composed onto ``start_pose`` (the live TCP pose at traj start) as
+        ``T_abs = T_start . T_rel`` -- so relative trajs are re-anchored to the
         current measured pose each cycle and never accumulate sequential error.
         """
-        if self.representation == ChunkRepresentation.ABSOLUTE:
+        if self.representation == TrajectoryRepresentation.ABSOLUTE:
             return self
         from . import transforms as T
 
@@ -232,12 +232,12 @@ class CartesianChunk:
                     n_frames=w.n_frames, duration=w.duration, frame=w.frame,
                 )
             )
-        return replace(self, waypoints=new_wps, representation=ChunkRepresentation.ABSOLUTE)
+        return replace(self, waypoints=new_wps, representation=TrajectoryRepresentation.ABSOLUTE)
 
-    def for_execution(self, start_pose: np.ndarray) -> "CartesianChunk":
+    def for_execution(self, start_pose: np.ndarray) -> "CartesianTrajectory":
         """Resolve to absolute and slice to the execution horizon H_exec.
 
-        This is what a ``Robot`` runs: relative chunks become absolute against the
+        This is what a ``Robot`` runs: relative trajs become absolute against the
         live start pose, and only the first ``n_execute`` waypoints are kept (the
         rest are discarded and re-predicted next cycle -- receding horizon).
         """
@@ -257,9 +257,9 @@ class CartesianChunk:
         gripper_span: float = 0.08,
         hold_orientation: bool = True,
         frames_hz: Optional[float] = None,
-        **chunk_kwargs,
-    ) -> "CartesianChunk":
-        """Build a chunk directly from a planner's ``(H, 5)`` action array ``u``.
+        **traj_kwargs,
+    ) -> "CartesianTrajectory":
+        """Build a traj directly from a planner's ``(H, 5)`` action array ``u``.
 
         ``u`` is an ``(H, 5)`` array of rows ``(x, y, z, w, n)`` where ``w`` is a
         *normalised* gripper command in ``[0, 1]`` (1 = open, 0 = closed) and ``n``
@@ -273,7 +273,7 @@ class CartesianChunk:
         ``n`` is interpreted at the ROBOT's control rate by default. A planner
         that ticks at its own rate (e.g. a simulator at 12 fps) should pass that
         rate as ``frames_hz``; each ``n`` then becomes ``duration = n/frames_hz``
-        so the chunk runs at the speed the planner simulated, independent of the
+        so the traj runs at the speed the planner simulated, independent of the
         robot's control rate.
         """
         if frames_hz is not None and frames_hz <= 0:
@@ -307,7 +307,7 @@ class CartesianChunk:
                     **timing,
                 )
             )
-        return cls(waypoints=wpts, **chunk_kwargs)
+        return cls(waypoints=wpts, **traj_kwargs)
 
     @classmethod
     def from_pose_array(
@@ -317,16 +317,16 @@ class CartesianChunk:
         gripper_force: float = 20.0,
         gripper_span: float = 0.08,
         frames_hz: Optional[float] = None,
-        **chunk_kwargs,
-    ) -> "CartesianChunk":
-        """Build a chunk from an ``(H, 9)`` array that carries orientation.
+        **traj_kwargs,
+    ) -> "CartesianTrajectory":
+        """Build a traj from an ``(H, 9)`` array that carries orientation.
 
         Each row is ``(x, y, z, qw, qx, qy, qz, w, n)``: an SE(3) pose (quaternion
         w-first) + normalised gripper ``w`` in ``[0, 1]`` + frame count ``n``. This
         is the orientation-carrying sibling of :meth:`from_waypoint_array`, for
         policies/planners that emit per-step orientation (full SE(3) action
-        chunks, e.g. ACT/openpi-style). Combine with ``representation=`` and
-        ``n_execute=`` via ``chunk_kwargs`` for relative / receding-horizon use.
+        trajs, e.g. ACT/openpi-style). Combine with ``representation=`` and
+        ``n_execute=`` via ``traj_kwargs`` for relative / receding-horizon use.
         """
         if frames_hz is not None and frames_hz <= 0:
             raise ValueError("frames_hz must be > 0")
@@ -349,7 +349,7 @@ class CartesianChunk:
                     **timing,
                 )
             )
-        return cls(waypoints=wpts, **chunk_kwargs)
+        return cls(waypoints=wpts, **traj_kwargs)
 
     @classmethod
     def from_topdown_array(
@@ -360,9 +360,9 @@ class CartesianChunk:
         gripper_span: float = 0.08,
         gripper_force: float = 20.0,
         frames_hz: Optional[float] = None,
-        **chunk_kwargs,
-    ) -> "CartesianChunk":
-        """Build a chunk from ``(H, 6)`` top-down waypoints ``(x, y, z, yaw, w, n)``.
+        **traj_kwargs,
+    ) -> "CartesianTrajectory":
+        """Build a traj from ``(H, 6)`` top-down waypoints ``(x, y, z, yaw, w, n)``.
 
         The canonical tabletop-manipulation action: a position, a wrist yaw about
         the base z axis, a normalised gripper command ``w`` in ``[0, 1]``, and a
@@ -396,7 +396,7 @@ class CartesianChunk:
                     **timing,
                 )
             )
-        return cls(waypoints=wpts, **chunk_kwargs)
+        return cls(waypoints=wpts, **traj_kwargs)
 
 
 # ----------------------------------------------------------------------------
@@ -443,16 +443,16 @@ class JointWaypoint:
 
 
 @dataclass
-class JointChunk:
+class JointTrajectory:
     waypoints: List[JointWaypoint]
     max_joint_speed_scale: float = 0.3   # fraction of joint vel limits
-    # Same semantics as CartesianChunk.safety_profile: "" = use the active
+    # Same semantics as CartesianTrajectory.safety_profile: "" = use the active
     # profile; a non-empty name must match the active profile or execution raises.
     safety_profile: str = ""
 
     def __post_init__(self) -> None:
         if not self.waypoints:
-            raise ValueError("JointChunk needs at least one waypoint")
+            raise ValueError("JointTrajectory needs at least one waypoint")
 
 
 # ----------------------------------------------------------------------------

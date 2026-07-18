@@ -12,9 +12,9 @@ or embed in a planner process::
 
     from flexiv_control.viz import RobotViz
     viz = RobotViz();  viz.attach(robot, allow_lease=True)
-    viz.preview_chunk(chunk)            # the intended motion, before executing
-    result = robot.execute_cartesian_chunk(chunk)
-    viz.on_step(i, chunk, result)
+    viz.preview_trajectory(traj)            # the intended motion, before executing
+    result = robot.execute_cartesian_trajectory(traj)
+    viz.on_step(i, traj, result)
 
 The preview math (``flexiv_control.viz.preview``) is numpy-only and importable
 without viser; only :class:`RobotViz` needs the extra.
@@ -24,10 +24,10 @@ from __future__ import annotations
 
 # numpy-only pieces: always importable (unit-tested in the core CI job).
 from .preview import (  # noqa: F401
-    ChunkPreview,
+    TrajectoryPreview,
     GripperEvent,
     effective_caps,
-    plan_chunk_preview,
+    plan_trajectory_preview,
     pose_distance,
     time_colors,
     workspace_box_edges,
@@ -35,10 +35,10 @@ from .preview import (  # noqa: F401
 
 __all__ = [
     "RobotViz",
-    "ChunkPreview",
+    "TrajectoryPreview",
     "GripperEvent",
     "effective_caps",
-    "plan_chunk_preview",
+    "plan_trajectory_preview",
     "pose_distance",
     "time_colors",
     "workspace_box_edges",

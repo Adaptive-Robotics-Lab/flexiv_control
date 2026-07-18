@@ -10,7 +10,7 @@ import pytest
 viser = pytest.importorskip("viser")
 
 from flexiv_control import (  # noqa: E402
-    CartesianChunk,
+    CartesianTrajectory,
     CartesianWaypoint,
     GripperCommand,
     Robot,
@@ -21,9 +21,9 @@ from flexiv_control.viz import RobotViz  # noqa: E402
 _PORT = 18763  # avoid the control server's 8766 and the default viz 8080
 
 
-def _chunk(start_pose):
+def _traj(start_pose):
     p = np.asarray(start_pose[:3], float)
-    return CartesianChunk(
+    return CartesianTrajectory(
         waypoints=[
             CartesianWaypoint(position=p + [0.05, 0.0, 0.0], quaternion=None,
                               gripper=GripperCommand(width=0.02, grasp=True),
@@ -62,20 +62,20 @@ def test_frames_mode_lifecycle(robot, viz):
     assert viz._workspace is not None               # workspace box drawn
     assert len(viz._trail_buf) >= 2                 # trail accumulating
 
-    chunk = _chunk(s.tcp_pose)
-    pv = viz.preview_chunk(chunk, s, robot.profile, chunk_id="t")
+    traj = _traj(s.tcp_pose)
+    pv = viz.preview_trajectory(traj, s, robot.profile, traj_id="t")
     assert len(pv.setpoints) > 10
     assert len(viz._plan_handles) >= 3              # path + knots + glyphs + terminal
     assert viz._ghost is not None
 
     gate = viz.gate()                                # pure-viz gate: no click needed
-    assert gate(1, chunk) is True
+    assert gate(1, traj) is True
 
-    result = robot.execute_cartesian_chunk(chunk, record=True)
-    viz.on_step(1, chunk, result)
+    result = robot.execute_cartesian_trajectory(traj, record=True)
+    viz.on_step(1, traj, result)
     with viz._preview_lock:
         assert viz._preview is None                  # preview cleared
-    assert "chunk 1" in viz._preview_md.content
+    assert "traj 1" in viz._preview_md.content
 
 
 def test_gate_refuses_stale_preview(robot, viz):
@@ -83,11 +83,11 @@ def test_gate_refuses_stale_preview(robot, viz):
     viz.attach(robot, allow_lease=True)
     s = robot.get_state()
     far = s.tcp_pose.copy()
-    far[0] += 0.10  # pretend the chunk was planned 10 cm ago
+    far[0] += 0.10  # pretend the traj was planned 10 cm ago
 
     # plan from the stale pose, then gate against the LIVE state
-    chunk = _chunk(far)
-    pv = viz.preview_chunk(chunk, state=s, chunk_id="stale")
+    traj = _traj(far)
+    pv = viz.preview_trajectory(traj, state=s, traj_id="stale")
     from flexiv_control.viz.preview import pose_distance
 
     # simulate: preview start far from live tcp

@@ -131,7 +131,7 @@ class FakeBackend(RobotBackend):
             raise RuntimeError(
                 f"stream_cartesian in mode {self._mode.value!r}: the real backend "
                 "requires a Cartesian motion mode; call start_cartesian_impedance() "
-                "first (Robot.execute_cartesian_chunk now auto-ensures it)"
+                "first (Robot.execute_cartesian_trajectory now auto-ensures it)"
             )
         pose = np.asarray(pose, float).reshape(7)
         self.cartesian_log.append(pose.copy())

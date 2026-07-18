@@ -3,7 +3,7 @@
 Runs entirely offline on the FakeBackend -- no hardware, no robot model
 assets (frames mode). Open the printed URL in a browser and you will see the
 TCP frame + gripper jaws move, the measured trail accumulate, the safety
-profile's workspace box, and -- before each chunk executes -- the INTENDED
+profile's workspace box, and -- before each traj executes -- the INTENDED
 motion: the true per-tick command path (time-colored start->end), waypoint
 knots, gripper open/close glyphs, the terminal pose, and an animated ghost.
 
@@ -24,7 +24,7 @@ import time
 
 
 from flexiv_control import (
-    CartesianChunk,
+    CartesianTrajectory,
     CartesianWaypoint,
     GripperCommand,
     Robot,
@@ -46,7 +46,7 @@ def main() -> None:
         for cycle in range(100):
             s = robot.get_state()
             p = s.tcp_pose[:3]
-            chunk = CartesianChunk(
+            traj = CartesianTrajectory(
                 waypoints=[
                     CartesianWaypoint(position=p + [0.06, 0.04, -0.05], quaternion=None,
                                       gripper=GripperCommand(width=0.02, grasp=True),
@@ -60,14 +60,14 @@ def main() -> None:
                 max_tcp_linear_speed=0.12,
             )
             # 1) show the INTENDED motion (and let the ghost animate a moment)
-            pv = viz.preview_chunk(chunk, s, robot.profile, chunk_id=str(cycle))
-            print(f"chunk {cycle}: {len(pv.setpoints)} setpoints, "
+            pv = viz.preview_trajectory(traj, s, robot.profile, traj_id=str(cycle))
+            print(f"traj {cycle}: {len(pv.setpoints)} setpoints, "
                   f"{pv.duration_s:.1f}s planned"
                   + (" (time-stretched)" if pv.time_stretched else ""))
             time.sleep(2.0)
             # 2) execute, then overlay commanded-vs-measured for debugging
-            result = robot.execute_cartesian_chunk(chunk, record=True)
-            viz.on_step(cycle, chunk, result)
+            result = robot.execute_cartesian_trajectory(traj, record=True)
+            viz.on_step(cycle, traj, result)
             time.sleep(1.0)
     except KeyboardInterrupt:
         pass

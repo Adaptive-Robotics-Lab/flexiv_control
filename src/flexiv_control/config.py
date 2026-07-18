@@ -113,8 +113,8 @@ class RobotConfig:
     # substep duration, and an optional TCP site name.
     model_path: Optional[str] = None
     # MuJoCo control substep duration. None = match the control rate (1/control_hz)
-    # so a chunk plays back at the SAME speed in sim as the loop streams it; the
-    # old fixed 0.02 s decoupled sim time from control_hz (chunks ran too fast/slow).
+    # so a traj plays back at the SAME speed in sim as the loop streams it; the
+    # old fixed 0.02 s decoupled sim time from control_hz (trajs ran too fast/slow).
     control_dt: Optional[float] = None
     mujoco_tcp_site: Optional[str] = None
     mujoco_gripper_actuator: Optional[str] = None
