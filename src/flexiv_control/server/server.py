@@ -204,6 +204,7 @@ class FlexivControlServer:
     def _build_handlers(self) -> Dict[str, Callable[[dict], Any]]:
         return {
             "ping": lambda p: {"pong": True},
+            "get_server_info": self._h_get_server_info,
             "acquire_lease": self._h_acquire_lease,
             "release_lease": self._h_release_lease,
             "heartbeat": self._h_heartbeat,
@@ -230,6 +231,10 @@ class FlexivControlServer:
         }
 
     # -- handlers ------------------------------------------------------------
+    def _h_get_server_info(self, p: dict) -> dict:
+        """Return software/protocol identity without a lease or robot access."""
+        return P.server_info()
+
     def _h_acquire_lease(self, p: dict) -> dict:
         force = bool(p.get("force", False))
         prev = self.lease.owner

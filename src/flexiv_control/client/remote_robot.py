@@ -216,6 +216,15 @@ class RemoteRobot:
                     break
 
     # -- mirror of the Robot API --------------------------------------------
+    def get_server_info(self) -> dict:
+        """Return the remote package/protocol identity without taking a lease."""
+        info = self._call("get_server_info")
+        if not isinstance(info, dict):
+            raise RemoteRobotError(
+                "get_server_info returned a non-object response"
+            )
+        return info
+
     def set_safety_profile(self, name: str) -> None:
         self._call("set_safety_profile", owner=self.owner, name=name)
 

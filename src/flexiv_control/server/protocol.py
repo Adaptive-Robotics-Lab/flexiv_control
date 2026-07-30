@@ -22,11 +22,14 @@ the client hand-rolls it.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 
+from .. import __version__
 from ..trajectory import (
     CartesianTrajectory,
     CartesianWaypoint,
@@ -46,6 +49,69 @@ from ..types import (
 )
 
 DEFAULT_PORT = 8766
+SERVER_INFO_SCHEMA = "flexiv-control.server-info.v1"
+PROTOCOL_ID = "flexiv-control.trajectory-rpc.v1"
+
+# Canonical, path-independent description of the wire seam that must agree
+# across the planner client and robot-side server.  In particular, this pins
+# the trajectory RPC names and payload key that differ from the incompatible
+# pre-0.2.1 ``*_chunk`` protocol.
+PROTOCOL_CONTRACT = {
+    "protocol_id": PROTOCOL_ID,
+    "transport": "newline-delimited-json-request-response-v1",
+    "identity_rpc": {
+        "method": "get_server_info",
+        "lease_required": False,
+    },
+    "trajectory_rpcs": {
+        "execute_cartesian_trajectory": "traj",
+        "execute_joint_trajectory": "traj",
+    },
+}
+
+
+def _canonical_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _source_fingerprint_sha256() -> str:
+    """Hash installed package source bytes without depending on install path."""
+    package_root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for path in sorted(package_root.rglob("*")):
+        if (
+            not path.is_file()
+            or "__pycache__" in path.parts
+            or path.suffix in {".pyc", ".pyo"}
+        ):
+            continue
+        relative = path.relative_to(package_root).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+PROTOCOL_FINGERPRINT_SHA256 = _canonical_sha256(PROTOCOL_CONTRACT)
+SOURCE_FINGERPRINT_SHA256 = _source_fingerprint_sha256()
+
+
+def server_info() -> dict[str, str]:
+    """Return immutable process identity; no lease or backend access required."""
+    return {
+        "schema": SERVER_INFO_SCHEMA,
+        "package": "flexiv-control",
+        "package_version": __version__,
+        "protocol_id": PROTOCOL_ID,
+        "protocol_fingerprint_sha256": PROTOCOL_FINGERPRINT_SHA256,
+        "source_fingerprint_sha256": SOURCE_FINGERPRINT_SHA256,
+    }
 
 
 # ---------------------------------------------------------------------------
