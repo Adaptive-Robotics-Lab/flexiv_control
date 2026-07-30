@@ -47,17 +47,23 @@ def test_mujoco_backend_fails_loudly_without_model():
 
 # -- torque gate -------------------------------------------------------------
 def test_rt_joint_torque_is_gated_off():
-    pytest.importorskip("flexivrdk")
+    flexivrdk = pytest.importorskip("flexivrdk")
     from flexiv_control.backends.flexiv_rdk import FlexivRdkBackend
 
     b = FlexivRdkBackend("X")  # allow_torque defaults to False
     b._robot = type("R", (), {"SwitchMode": staticmethod(lambda *_a, **_k: None)})()
     with pytest.raises(RuntimeError):
         b.set_mode(ControlMode.RT_JOINT_TORQUE)
-    # opt-in lets it through
+    # Opt-in lets it through only when the installed RDK exposes that mode.
+    # Older supported RDK builds intentionally fail loudly instead of
+    # pretending that an unavailable real-time mode was selected.
     b2 = FlexivRdkBackend("X", allow_torque=True)
     b2._robot = type("R", (), {"SwitchMode": staticmethod(lambda *_a, **_k: None)})()
-    b2.set_mode(ControlMode.RT_JOINT_TORQUE)  # must not raise
+    if hasattr(flexivrdk.Mode, "RT_JOINT_TORQUE"):
+        b2.set_mode(ControlMode.RT_JOINT_TORQUE)
+    else:
+        with pytest.raises(RuntimeError, match="does not expose"):
+            b2.set_mode(ControlMode.RT_JOINT_TORQUE)
 
 
 # -- SpaceMouse intervention (the previously-untested HIL-SERL path) ----------
