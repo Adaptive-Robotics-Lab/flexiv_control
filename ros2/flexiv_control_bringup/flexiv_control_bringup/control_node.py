@@ -37,7 +37,6 @@ Community project, NOT affiliated with Flexiv Robotics.
 """
 from __future__ import annotations
 
-import numpy as np
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup

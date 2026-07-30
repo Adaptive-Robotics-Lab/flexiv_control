@@ -6,6 +6,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-30
+
+### Changed
+- Unified the v0.2.0 SpaceMouse/ROS gripper and twist fixes with the canonical
+  trajectory API used by ActAhead (`JointTrajectory`,
+  `execute_joint_trajectory`, and the corresponding wire protocol).
+- Client and robot-control server deployments can now bind to one exact source
+  commit instead of combining the trajectory client from a post-v0.1.8 branch
+  with a divergent v0.2.0 action-chunk server.
+
 ## [0.2.0] - 2026-07-09
 
 Fixes from the July 2026 cross-repo audit against `flexiv-spacemouse-teleop`.
