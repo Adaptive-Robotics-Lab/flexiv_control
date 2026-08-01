@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -187,6 +188,30 @@ def test_command_gripper_wait_returns_width():
     w = r.command_gripper(GripperCommand(width=0.05), wait=True, timeout=2.0)
     assert w == pytest.approx(0.05, abs=1e-3)  # float, matching RemoteRobot
     assert r.command_gripper(GripperCommand(width=0.08)) is None  # fire-and-forget
+
+
+def test_move_wait_does_not_accept_pre_motion_stillness(monkeypatch):
+    """GN01 may report stillness during command latency; wait for Move target."""
+    r = _robot()
+    reads = 0
+
+    def delayed_state():
+        nonlocal reads
+        reads += 1
+        return SimpleNamespace(
+            gripper_width=0.001 if reads < 18 else 0.1,
+            gripper_is_moving=False,
+        )
+
+    monkeypatch.setattr(r.backend, "move_gripper", lambda _cmd: None)
+    monkeypatch.setattr(r, "get_state", delayed_state)
+
+    width = r.command_gripper(
+        GripperCommand(width=0.1), wait=True, timeout=2.0
+    )
+
+    assert width == pytest.approx(0.1)
+    assert reads >= 18
 
 
 def test_home_restores_joints_and_gripper():

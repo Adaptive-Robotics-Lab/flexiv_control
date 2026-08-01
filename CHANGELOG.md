@@ -6,6 +6,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-08-01
+
+### Fixed
+- Blocking `Gripper.Move` calls now wait for the commanded width instead of
+  accepting pre-motion stillness during GN01 actuation latency. Obstructed
+  stillness remains a valid completion condition only for `Gripper.Grasp`.
+
 ## [0.2.3] - 2026-07-31
 
 ### Added

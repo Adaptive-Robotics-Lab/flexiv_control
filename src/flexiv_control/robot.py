@@ -1172,11 +1172,12 @@ class Robot:
         which is why every consumer that needs "open, then proceed" used to
         fabricate a do-nothing motion traj just to ride its blocking executor.
 
-        Settle detection: reaching the commanded width (non-grasp), or width
-        unchanged while not moving -- the latter only counts after motion has
-        been OBSERVED or a 0.5 s dwell has passed, because real hardware has an
-        actuation-latency window after the command in which the unchanged OLD
-        width would otherwise read as "settled"."""
+        Settle detection: a ``Move`` command must reach its commanded width.
+        Only a true ``Grasp`` command may settle at an unchanged, obstructed
+        width.  Treating stillness as success for ``Move`` is unsafe on GN01:
+        the hardware can report ``is_moving=False`` during its actuation
+        latency, which previously let an open command return while the fingers
+        were still closed."""
         self._check_lease()
         initial = self.get_state().gripper_width
         self.backend.move_gripper(cmd)
@@ -1193,13 +1194,14 @@ class Robot:
             if state.gripper_is_moving or abs(state.gripper_width - initial) > 1e-3:
                 moved = True
             settled_target = (not cmd.grasp) and abs(state.gripper_width - cmd.width) < 2e-3
-            settled_still = (
-                prev_width is not None
+            settled_grasp = (
+                cmd.grasp
+                and prev_width is not None
                 and abs(state.gripper_width - prev_width) < 5e-4
                 and not state.gripper_is_moving
                 and (moved or time.time() - t0 >= 0.5)
             )
-            if settled_target or settled_still:
+            if settled_target or settled_grasp:
                 break
             prev_width = state.gripper_width
             time.sleep(0.05)
