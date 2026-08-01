@@ -37,7 +37,7 @@ from typing import Any, Callable, Dict, Optional
 import numpy as np
 
 from ..config import RobotConfig
-from ..robot import Robot
+from ..robot import Robot, TrajectoryPrevalidationError
 from ..types import GripperCommand, ImpedanceParams
 from . import protocol as P
 from .control_loop import ReactiveServoLoop
@@ -78,6 +78,7 @@ class FlexivControlServer:
 
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> None:
+        self._reset_joint_target_continuity()
         # Host-wide arbitration: refuse to start if another *live* process holds
         # this robot (a second server, or a direct script). Reclaimed automatically
         # if the previous holder crashed (its PID is dead).
@@ -132,6 +133,7 @@ class FlexivControlServer:
         return t
 
     def shutdown(self) -> None:
+        self._reset_joint_target_continuity()
         with self._robot_lock:
             loop, self._servo_loop = self._servo_loop, None
         if loop is not None:
@@ -146,89 +148,71 @@ class FlexivControlServer:
             self.robot.disconnect()
             if self._host_lock is not None:
                 self._host_lock.release()
+            self._reset_joint_target_continuity()
 
     def _reset_joint_target_continuity(self) -> None:
         self._last_ack_joint_target = None
         self._last_ack_gripper_target = None
         self._joint_target_owner = ""
 
-    def _validate_joint_target_continuity(self, owner: str, traj) -> str:
-        """Validate knot 0 without substituting measured tracking state."""
+    def _joint_target_execution_context(self, owner: str, traj) -> tuple[str, dict[str, Any]]:
+        """Validate shape and retain prior targets as provenance."""
         if traj.initial_positions is None:
             # Explicit legacy mode deliberately starts from measured q and
-            # cannot participate in acknowledged-target chaining.
+            # cannot participate in acknowledged-target provenance.
             self._reset_joint_target_continuity()
-            return "legacy_measured"
-        initial = np.asarray(traj.initial_positions, float)
-        if self._last_ack_joint_target is not None:
-            if self._joint_target_owner != owner:
-                self._reset_joint_target_continuity()
-                raise ValueError("joint target continuity owner changed")
-            if initial.shape != self._last_ack_joint_target.shape:
-                raise ValueError(
-                    "initial_positions shape does not match the last acknowledged "
-                    f"joint target: {initial.shape} != "
-                    f"{self._last_ack_joint_target.shape}"
-                )
-            delta = np.abs(initial - self._last_ack_joint_target)
-            if np.any(delta > 1e-9):
-                raise ValueError(
-                    "initial_positions does not match the last acknowledged "
-                    f"joint target (max error {float(np.max(delta)):.9g} rad)"
-                )
-            if traj.initial_gripper_width is not None:
-                if self._last_ack_gripper_target is None:
-                    raise ValueError(
-                        "initial_gripper_width cannot chain from a prior RPC "
-                        "without an acknowledged gripper target"
-                    )
-                grip_error = abs(float(traj.initial_gripper_width) - self._last_ack_gripper_target)
-                if grip_error > 1e-9:
-                    raise ValueError(
-                        "initial_gripper_width does not match the last acknowledged "
-                        f"gripper target (error {grip_error:.9g} m)"
-                    )
-            return "last_acknowledged_target"
+            return "legacy_measured", {}
 
         state = self.robot.get_state()
+        initial = np.asarray(traj.initial_positions, float)
         if initial.shape != state.q.shape:
             raise ValueError(
                 f"initial_positions shape {initial.shape} does not match measured "
                 f"q shape {state.q.shape}"
             )
-        one_tick = (
-            self.robot._joint_velocity_limits  # noqa: SLF001
-            * float(traj.max_joint_speed_scale)
-            / float(self.robot.control_hz)
-        )
-        delta = np.abs(initial - state.q)
-        if np.any(delta > one_tick + 1e-12):
-            joint = int(np.flatnonzero(delta > one_tick + 1e-12)[0])
-            raise ValueError(
-                "first explicit initial_positions exceeds the one-tick measured "
-                f"continuity bound at joint {joint}: error {delta[joint]:.9g} rad > "
-                f"{one_tick[joint]:.9g} rad"
-            )
-        if traj.initial_gripper_width is not None:
-            limits = self.robot.backend.runtime_info().get("gripper_limits")
-            if limits is not None:
-                width_error = abs(float(traj.initial_gripper_width) - state.gripper_width)
-                grip_tick = float(limits["max_velocity_m_s"]) / self.robot.control_hz
-                if width_error > grip_tick + 1e-12:
-                    raise ValueError(
-                        "first explicit initial_gripper_width exceeds the one-tick "
-                        f"measured continuity bound: error {width_error:.9g} m > "
-                        f"{grip_tick:.9g} m"
-                    )
-        return "first_call_measured_one_tick"
 
-    def _ack_joint_target(self, owner: str, traj) -> None:
+        evidence: dict[str, Any] = {}
+        source = "measured_rebase"
+        if self._last_ack_joint_target is not None:
+            if self._joint_target_owner != owner:
+                # Lease acquisition normally clears this already; fail closed
+                # against stale cross-owner provenance without rejecting a safe
+                # measured rebase for the current owner.
+                self._reset_joint_target_continuity()
+            else:
+                source = "measured_rebase_with_prior_ack"
+                evidence["previous_acknowledged_joint_target"] = (
+                    self._last_ack_joint_target.tolist()
+                )
+                evidence["measured_joint_delta_from_previous_ack_rad"] = (
+                    state.q - self._last_ack_joint_target
+                ).tolist()
+                evidence["initial_joint_delta_from_previous_ack_rad"] = (
+                    initial - self._last_ack_joint_target
+                ).tolist()
+                if self._last_ack_gripper_target is not None:
+                    evidence["previous_acknowledged_gripper_target_m"] = float(
+                        self._last_ack_gripper_target
+                    )
+                    evidence["measured_gripper_delta_from_previous_ack_m"] = float(
+                        state.gripper_width - self._last_ack_gripper_target
+                    )
+                    if traj.initial_gripper_width is not None:
+                        evidence["initial_gripper_delta_from_previous_ack_m"] = float(
+                            traj.initial_gripper_width - self._last_ack_gripper_target
+                        )
+
+        # Knot 0 is an interpolation origin, not a streamed command. Every
+        # feedback-MPC RPC therefore rebases the filter and first gripper ramp
+        # to current telemetry, while the executor validates the actual first
+        # emitted command against the effective one-tick/runtime bounds.
+        return source, evidence
+
+    def _ack_joint_target(self, owner: str, traj, ending_gripper_target: Optional[float]) -> None:
         self._last_ack_joint_target = traj.waypoints[-1].positions.copy()
-        width = traj.initial_gripper_width
-        for waypoint in traj.waypoints:
-            if waypoint.gripper is not None:
-                width = waypoint.gripper.width
-        self._last_ack_gripper_target = None if width is None else float(width)
+        self._last_ack_gripper_target = (
+            None if ending_gripper_target is None else float(ending_gripper_target)
+        )
         self._joint_target_owner = owner
 
     # -- dispatch ------------------------------------------------------------
@@ -463,15 +447,20 @@ class FlexivControlServer:
             )
         traj = P.joint_trajectory_from_dict(p["traj"])
         with self._motion_lock(owner):
-            continuity = self._validate_joint_target_continuity(owner, traj)
+            continuity, continuity_evidence = self._joint_target_execution_context(owner, traj)
             try:
                 r = self.robot.execute_joint_trajectory(traj)
+            except TrajectoryPrevalidationError:
+                # No backend write occurred, so retain prior acknowledged
+                # targets as provenance for a corrected retry.
+                raise
             except Exception:
                 self._reset_joint_target_continuity()
                 raise
             r.log["continuity_source"] = continuity
+            r.log.update(continuity_evidence)
             if r.success and traj.initial_positions is not None:
-                self._ack_joint_target(owner, traj)
+                self._ack_joint_target(owner, traj, r.log.get("ending_gripper_target_m"))
                 r.log["acknowledged_ending_joint_target"] = self._last_ack_joint_target.tolist()
                 r.log["acknowledged_ending_gripper_target_m"] = self._last_ack_gripper_target
             elif r.success:

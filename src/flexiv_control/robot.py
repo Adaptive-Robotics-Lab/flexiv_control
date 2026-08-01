@@ -49,6 +49,7 @@ from .types import (
     ImpedanceParams,
     JointImpedanceParams,
     RobotState,
+    SafetyStatus,
     StopReason,
 )
 
@@ -74,6 +75,10 @@ class TrajectoryStoppedError(RuntimeError):
     def __init__(self, result: ExecutionResult):
         super().__init__(f"traj stopped: {result.summary()}")
         self.result = result
+
+
+class TrajectoryPrevalidationError(ValueError):
+    """A joint trajectory was rejected before any backend write."""
 
 
 class Robot:
@@ -754,10 +759,35 @@ class Robot:
         return self.execute_joint_trajectory(traj)
 
     def execute_joint_trajectory(
-        self, traj: JointTrajectory, *, raise_on_stop: bool = False
+        self,
+        traj: JointTrajectory,
+        *,
+        raise_on_stop: bool = False,
     ) -> ExecutionResult:
         self._check_lease()
         result = ExecutionResult(success=True)
+
+        def reject_unsafe_entry(state: RobotState) -> Optional[ExecutionResult]:
+            reason = StopReason.NONE
+            if self.backend.in_fault() or state.safety_status != SafetyStatus.OK:
+                reason = (
+                    state.stop_reason
+                    if state.stop_reason != StopReason.NONE
+                    else StopReason.BACKEND_FAULT
+                )
+            elif np.any(np.abs(state.wrench) > self.profile.max_contact_wrench):
+                reason = StopReason.CONTACT_WRENCH
+            if reason == StopReason.NONE:
+                return None
+            result.success = False
+            result.stop_reason = reason.value
+            result.final_state = state
+            result.log["prewrite_safety_rejection"] = True
+            result.log["entry_safety_status"] = state.safety_status.value
+            if raise_on_stop:
+                raise TrajectoryStoppedError(result)
+            return result
+
         if self._cancel.is_set():
             self._cancel.clear()
             result.success = False
@@ -767,129 +797,178 @@ class Robot:
             if raise_on_stop:
                 raise TrajectoryStoppedError(result)
             return result
-        self._verify_trajectory_profile(traj.safety_profile, result)
-        requested_speed_scale = float(traj.max_joint_speed_scale)
-        active_speed_scale = float(self.profile.max_joint_speed_scale)
-        result.log["requested_max_joint_speed_scale"] = requested_speed_scale
-        result.log["active_max_joint_speed_scale"] = active_speed_scale
-        if requested_speed_scale > active_speed_scale + 1e-12:
-            raise ValueError(
-                "JointTrajectory max_joint_speed_scale "
-                f"{requested_speed_scale:.9g} exceeds active safety-profile "
-                f"ceiling {active_speed_scale:.9g}"
-            )
-        effective_speed_scale = requested_speed_scale
-        result.log["effective_max_joint_speed_scale"] = effective_speed_scale
-        result.log["joint_interpolation"] = traj.interpolation
-        result.log["strict_timing"] = traj.strict_timing
+        try:
+            self._verify_trajectory_profile(traj.safety_profile, result)
+            requested_speed_scale = float(traj.max_joint_speed_scale)
+            active_speed_scale = float(self.profile.max_joint_speed_scale)
+            result.log["requested_max_joint_speed_scale"] = requested_speed_scale
+            result.log["active_max_joint_speed_scale"] = active_speed_scale
+            if requested_speed_scale > active_speed_scale + 1e-12:
+                raise ValueError(
+                    "JointTrajectory max_joint_speed_scale "
+                    f"{requested_speed_scale:.9g} exceeds active safety-profile "
+                    f"ceiling {active_speed_scale:.9g}"
+                )
+            effective_speed_scale = requested_speed_scale
+            result.log["effective_max_joint_speed_scale"] = effective_speed_scale
+            result.log["joint_interpolation"] = traj.interpolation
+            result.log["strict_timing"] = traj.strict_timing
+        except ValueError as exc:
+            raise TrajectoryPrevalidationError(str(exc)) from exc
 
         # Read measured state once, then prevalidate the entire atomic RPC before
         # any mode switch, gripper Move, or arm setpoint can reach the backend.
         start_state = self.get_state()
-        initial_q = (
-            start_state.q.copy()
-            if traj.initial_positions is None
-            else np.asarray(traj.initial_positions, float).reshape(-1).copy()
-        )
-        if initial_q.shape != start_state.q.shape:
-            raise ValueError(
-                f"initial_positions must match measured q shape {start_state.q.shape}, "
-                f"got {initial_q.shape}"
+        entry_rejection = reject_unsafe_entry(start_state)
+        if entry_rejection is not None:
+            return entry_rejection
+        try:
+            initial_q = (
+                start_state.q.copy()
+                if traj.initial_positions is None
+                else np.asarray(traj.initial_positions, float).reshape(-1).copy()
             )
-        effective_joint_speed = self._joint_velocity_limits * effective_speed_scale
-        interp = JointTrajectoryInterpolator(
-            traj,
-            initial_q,
-            self.control_hz,
-            max_joint_speed=effective_joint_speed,
-        )
-
-        joint_lo = self.profile.joint_lower + self.profile.joint_margin_rad
-        joint_hi = self.profile.joint_upper - self.profile.joint_margin_rad
-        if traj.strict_timing:
-            for label, target in [
-                ("initial_positions", initial_q),
-                *[
-                    (f"waypoints[{i}].positions", wp.positions)
-                    for i, wp in enumerate(traj.waypoints)
-                ],
-            ]:
-                if np.any(target < joint_lo) or np.any(target > joint_hi):
-                    raise ValueError(
-                        f"strict_timing {label} exceeds effective joint position limits"
-                    )
-
-        initial_gripper = (
-            start_state.gripper_width
-            if traj.initial_gripper_width is None
-            else float(traj.initial_gripper_width)
-        )
-        runtime_gripper = self.backend.runtime_info().get("gripper_limits")
-        if runtime_gripper is not None:
-            width_lo = float(runtime_gripper["min_width_m"])
-            width_hi = float(runtime_gripper["max_width_m"])
-            if not width_lo <= initial_gripper <= width_hi:
+            if initial_q.shape != start_state.q.shape:
                 raise ValueError(
-                    f"initial_gripper_width={initial_gripper!r} outside runtime "
-                    f"[{width_lo}, {width_hi}] from flexivrdk.Gripper.params"
+                    f"initial_positions must match measured q shape {start_state.q.shape}, "
+                    f"got {initial_q.shape}"
                 )
-        gripper_events: list[dict] = []
-        previous_width = initial_gripper
-        boundary_tick = 0
-        for segment, (wp, requested_ticks, scheduled_ticks) in enumerate(
-            zip(
-                traj.waypoints,
-                interp.requested_segment_ticks,
-                interp.scheduled_segment_ticks,
+            joint_filter_anchor = start_state.q.copy()
+            if joint_filter_anchor.shape != start_state.q.shape:
+                raise ValueError(
+                    "joint filter anchor must match measured q shape "
+                    f"{start_state.q.shape}, got {joint_filter_anchor.shape}"
+                )
+            if not np.all(np.isfinite(joint_filter_anchor)):
+                raise ValueError("joint filter anchor must be finite")
+            effective_joint_speed = self._joint_velocity_limits * effective_speed_scale
+            interp = JointTrajectoryInterpolator(
+                traj,
+                initial_q,
+                self.control_hz,
+                max_joint_speed=effective_joint_speed,
             )
-        ):
-            boundary_tick += scheduled_ticks
-            if wp.gripper is None:
-                continue
-            target = wp.gripper
-            delta_width = abs(target.width - previous_width)
-            segment_duration = scheduled_ticks * self.dt
-            required_velocity = delta_width / segment_duration
-            velocity = required_velocity if target.velocity is None else target.velocity
-            if delta_width > 1e-12 and target.velocity is not None:
-                if not np.isclose(target.velocity, required_velocity, rtol=1e-6, atol=1e-9):
-                    raise ValueError(
-                        f"JointWaypoint {segment} gripper velocity {target.velocity:.9g} "
-                        f"m/s does not realize width delta {delta_width:.9g} m in "
-                        f"scheduled n_frames={scheduled_ticks}; required "
-                        f"{required_velocity:.9g} m/s"
-                    )
-            if runtime_gripper is not None:
-                checks = [
-                    ("width", target.width, "min_width_m", "max_width_m"),
-                    ("force", target.force, "min_force_n", "max_force_n"),
-                ]
-                if delta_width > 1e-12:
-                    checks.append(("velocity", velocity, "min_velocity_m_s", "max_velocity_m_s"))
-                for field, value, lo_key, hi_key in checks:
-                    lo = float(runtime_gripper[lo_key])
-                    hi = float(runtime_gripper[hi_key])
-                    if not np.isfinite(value) or not lo <= value <= hi:
+            first_q = next(iter(interp)) if traj.strict_timing else None
+
+            def first_joint_bound_error(anchor_q: np.ndarray) -> Optional[str]:
+                if first_q is None:
+                    return None
+                first_step = np.abs(first_q - anchor_q)
+                first_step_limit = effective_joint_speed * self.dt
+                too_fast = first_step > first_step_limit + 1e-12
+                if not np.any(too_fast):
+                    return None
+                joint = int(np.flatnonzero(too_fast)[0])
+                return (
+                    "strict_timing first emitted joint target exceeds the "
+                    "effective one-tick rate bound; "
+                    f"joint {joint}: step {first_step[joint]:.9g} rad > "
+                    f"{first_step_limit[joint]:.9g} rad at "
+                    f"control_hz={self.control_hz:.9g}"
+                )
+
+            first_error = first_joint_bound_error(joint_filter_anchor)
+            if first_error is not None:
+                raise ValueError(first_error)
+
+            joint_lo = self.profile.joint_lower + self.profile.joint_margin_rad
+            joint_hi = self.profile.joint_upper - self.profile.joint_margin_rad
+            if traj.strict_timing:
+                for label, target in [
+                    ("initial_positions", initial_q),
+                    *[
+                        (f"waypoints[{i}].positions", wp.positions)
+                        for i, wp in enumerate(traj.waypoints)
+                    ],
+                ]:
+                    if np.any(target < joint_lo) or np.any(target > joint_hi):
                         raise ValueError(
-                            f"JointWaypoint {segment} gripper {field}={value!r} "
-                            f"outside runtime [{lo}, {hi}] from "
-                            "flexivrdk.Gripper.params"
+                            f"strict_timing {label} exceeds effective joint position limits"
                         )
-            gripper_events.append(
-                {
-                    "segment": segment,
-                    "requested_segment_ticks": requested_ticks,
-                    "scheduled_segment_ticks": scheduled_ticks,
-                    "start_tick": boundary_tick - scheduled_ticks,
-                    "end_tick": boundary_tick,
-                    "start_width_m": previous_width,
-                    "target_width_m": target.width,
-                    "velocity_m_s": velocity,
-                    "force_n": target.force,
-                    "dispatch": delta_width > 1e-12,
-                }
+
+            initial_gripper = (
+                start_state.gripper_width
+                if traj.initial_gripper_width is None
+                else float(traj.initial_gripper_width)
             )
-            previous_width = target.width
+            gripper_execution_anchor = float(start_state.gripper_width)
+            if not np.isfinite(gripper_execution_anchor):
+                raise ValueError("gripper execution anchor must be finite")
+            runtime_gripper = self.backend.runtime_info().get("gripper_limits")
+            if runtime_gripper is not None:
+                width_lo = float(runtime_gripper["min_width_m"])
+                width_hi = float(runtime_gripper["max_width_m"])
+                for label, width in (
+                    ("initial_gripper_width", initial_gripper),
+                    ("gripper execution anchor", gripper_execution_anchor),
+                ):
+                    if not width_lo <= width <= width_hi:
+                        raise ValueError(
+                            f"{label}={width!r} outside runtime [{width_lo}, {width_hi}] "
+                            "from flexivrdk.Gripper.params"
+                        )
+            gripper_events: list[dict] = []
+            previous_width = gripper_execution_anchor
+            boundary_tick = 0
+            for segment, (wp, requested_ticks, scheduled_ticks) in enumerate(
+                zip(
+                    traj.waypoints,
+                    interp.requested_segment_ticks,
+                    interp.scheduled_segment_ticks,
+                )
+            ):
+                boundary_tick += scheduled_ticks
+                if wp.gripper is None:
+                    continue
+                target = wp.gripper
+                delta_width = abs(target.width - previous_width)
+                segment_duration = scheduled_ticks * self.dt
+                required_velocity = delta_width / segment_duration
+                velocity = required_velocity if target.velocity is None else target.velocity
+                if delta_width > 1e-12 and target.velocity is not None:
+                    if not np.isclose(target.velocity, required_velocity, rtol=1e-6, atol=1e-9):
+                        raise ValueError(
+                            f"JointWaypoint {segment} gripper velocity {target.velocity:.9g} "
+                            f"m/s does not realize width delta {delta_width:.9g} m in "
+                            f"scheduled n_frames={scheduled_ticks}; required "
+                            f"{required_velocity:.9g} m/s"
+                        )
+                if runtime_gripper is not None:
+                    checks = [
+                        ("width", target.width, "min_width_m", "max_width_m"),
+                        ("force", target.force, "min_force_n", "max_force_n"),
+                    ]
+                    if delta_width > 1e-12:
+                        checks.append(
+                            ("velocity", velocity, "min_velocity_m_s", "max_velocity_m_s")
+                        )
+                    for field, value, lo_key, hi_key in checks:
+                        lo = float(runtime_gripper[lo_key])
+                        hi = float(runtime_gripper[hi_key])
+                        if not np.isfinite(value) or not lo <= value <= hi:
+                            raise ValueError(
+                                f"JointWaypoint {segment} gripper {field}={value!r} "
+                                f"outside runtime [{lo}, {hi}] from "
+                                "flexivrdk.Gripper.params"
+                            )
+                gripper_events.append(
+                    {
+                        "segment": segment,
+                        "requested_segment_ticks": requested_ticks,
+                        "scheduled_segment_ticks": scheduled_ticks,
+                        "start_tick": boundary_tick - scheduled_ticks,
+                        "end_tick": boundary_tick,
+                        "start_width_m": previous_width,
+                        "target_width_m": target.width,
+                        "velocity_m_s": velocity,
+                        "requested_velocity_m_s": target.velocity,
+                        "force_n": target.force,
+                        "dispatch": delta_width > 1e-12,
+                    }
+                )
+                previous_width = target.width
+        except ValueError as exc:
+            raise TrajectoryPrevalidationError(str(exc)) from exc
 
         result.log["base_joint_velocity_limits_rad_s"] = self._joint_velocity_limits.tolist()
         if self._effective_joint_contract is not None:
@@ -902,27 +981,39 @@ class Robot:
         result.log["scheduled_total_ticks"] = int(interp.scheduled_total_ticks)
         result.log["scheduled_duration_s"] = float(interp.scheduled_total_ticks * self.dt)
         result.log["initial_joint_target"] = initial_q.tolist()
+        result.log["joint_filter_anchor"] = joint_filter_anchor.tolist()
         result.log["ending_joint_target"] = traj.waypoints[-1].positions.tolist()
         result.log["initial_gripper_target_m"] = initial_gripper
+        result.log["gripper_execution_anchor_m"] = gripper_execution_anchor
         result.log["ending_gripper_target_m"] = previous_width
         result.log["gripper_events"] = gripper_events
         result.log["gripper_tracking"] = []
 
+        start_state = self.get_state()
+        entry_rejection = reject_unsafe_entry(start_state)
+        if entry_rejection is not None:
+            return entry_rejection
         if start_state.control_mode.is_cartesian or start_state.control_mode == ControlMode.IDLE:
             self.start_joint_impedance()
             result.log["mode_autostarted"] = True
             start_state = self.get_state()
-        # Command continuity is against explicit knot 0, not measured tracking.
-        self.filter.reset(start_state, q=initial_q)
+        # Re-anchor after a possible mode transition. The first loop snapshot
+        # below refreshes this once more immediately before any actuator write.
+        joint_filter_anchor = start_state.q.copy()
+        gripper_execution_anchor = float(start_state.gripper_width)
+        result.log["joint_filter_anchor"] = joint_filter_anchor.tolist()
+        result.log["gripper_execution_anchor_m"] = gripper_execution_anchor
+        self.filter.reset(start_state, q=joint_filter_anchor)
 
         events_by_segment = {event["segment"]: event for event in gripper_events}
-        active_gripper_target = initial_gripper
+        active_gripper_target = gripper_execution_anchor
+        first_gripper_event_checked = False
         t_loop = time.perf_counter()
         execution_started = t_loop
         streamed_ticks = 0
         max_joint_speed = 0.0
         max_tracking_error = 0.0
-        previous_command = initial_q
+        previous_command = joint_filter_anchor
         for q in interp:
             if self._cancel.is_set():
                 self._cancel.clear()
@@ -941,10 +1032,81 @@ class Robot:
                 result.success = False
                 result.stop_reason = StopReason.CONTACT_WRENCH.value
                 break
+            if streamed_ticks == 0:
+                # This is the freshest telemetry available before the first
+                # Gripper.Move or joint stream. Recheck instead of trusting the
+                # earlier atomic-prevalidation snapshot across a mode switch.
+                joint_filter_anchor = state.q.copy()
+                joint_error = first_joint_bound_error(joint_filter_anchor)
+                if joint_error is not None:
+                    self.backend.stop()
+                    result.success = False
+                    result.stop_reason = StopReason.JOINT_LIMIT.value
+                    result.log["predispatch_joint_rejection"] = joint_error
+                    break
+                gripper_execution_anchor = float(state.gripper_width)
+                result.log["joint_filter_anchor"] = joint_filter_anchor.tolist()
+                result.log["gripper_execution_anchor_m"] = gripper_execution_anchor
+                self.filter.reset(state, q=joint_filter_anchor)
+                previous_command = joint_filter_anchor.copy()
+                active_gripper_target = gripper_execution_anchor
             if interp.current_segment_tick == 1:
                 event = events_by_segment.get(interp.current_segment)
                 if event is not None:
                     event["measured_width_at_dispatch_m"] = state.gripper_width
+                    if not first_gripper_event_checked:
+                        first_gripper_event_checked = True
+                        measured_width = float(state.gripper_width)
+                        delta_width = abs(event["target_width_m"] - measured_width)
+                        segment_duration = event["scheduled_segment_ticks"] * self.dt
+                        required_velocity = delta_width / segment_duration
+                        requested_velocity = event["requested_velocity_m_s"]
+                        velocity = (
+                            required_velocity if requested_velocity is None else requested_velocity
+                        )
+                        gripper_error = None
+                        if delta_width > 1e-12 and requested_velocity is not None:
+                            if not np.isclose(
+                                requested_velocity,
+                                required_velocity,
+                                rtol=1e-6,
+                                atol=1e-9,
+                            ):
+                                gripper_error = (
+                                    "first gripper event velocity no longer realizes "
+                                    "the measured width delta over the remaining "
+                                    f"segment: requested {requested_velocity:.9g} m/s, "
+                                    f"required {required_velocity:.9g} m/s"
+                                )
+                        if runtime_gripper is not None and gripper_error is None:
+                            width_lo = float(runtime_gripper["min_width_m"])
+                            width_hi = float(runtime_gripper["max_width_m"])
+                            if not width_lo <= measured_width <= width_hi:
+                                gripper_error = (
+                                    f"measured gripper width {measured_width:.9g} m "
+                                    f"outside runtime [{width_lo}, {width_hi}]"
+                                )
+                            elif delta_width > 1e-12:
+                                velocity_lo = float(runtime_gripper["min_velocity_m_s"])
+                                velocity_hi = float(runtime_gripper["max_velocity_m_s"])
+                                if not velocity_lo <= velocity <= velocity_hi:
+                                    gripper_error = (
+                                        f"first gripper event velocity {velocity:.9g} m/s "
+                                        f"outside runtime [{velocity_lo}, {velocity_hi}] "
+                                        "after measured-width rebase"
+                                    )
+                        if gripper_error is not None:
+                            self.backend.stop()
+                            result.success = False
+                            result.stop_reason = StopReason.GRIPPER_LIMIT.value
+                            result.log["predispatch_gripper_rejection"] = gripper_error
+                            break
+                        event["prevalidated_start_width_m"] = event["start_width_m"]
+                        event["start_width_m"] = measured_width
+                        event["velocity_m_s"] = velocity
+                        event["dispatch"] = delta_width > 1e-12
+                        gripper_execution_anchor = measured_width
+                        result.log["gripper_execution_anchor_m"] = measured_width
                     if event["dispatch"]:
                         self.backend.move_gripper(
                             GripperCommand(
@@ -955,6 +1117,8 @@ class Robot:
                             )
                         )
                     active_gripper_target = event["target_width_m"]
+            if not result.success:
+                break
             sr = self.filter.filter_joint(q, state)
             if not sr.ok or (traj.strict_timing and sr.clipped):
                 self.backend.stop()

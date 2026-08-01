@@ -11,9 +11,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - Joint trajectories can carry an explicit actuator-target knot 0, exact
   per-waypoint gripper targets, and strict authoritative `n_frames` timing.
-- The server chains explicit trajectories against the last acknowledged joint
-  and gripper targets, while retaining measured-state legacy execution for
-  non-strict callers.
+- The server records acknowledged joint and gripper endpoints as provenance
+  while rebasing each feedback-MPC prefix to current measured state.
 
 ### Changed
 - The joint trajectory wire schema and trajectory RPC identity are v3 and
@@ -22,6 +21,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   joint and `Gripper.params` limits; violations reject instead of clipping or
   time-stretching. `Gripper.Move` dispatches fire-and-forget at each segment
   boundary while arm streaming continues in the same RPC.
+
+### Fixed
+- Strict execution now bounds the actual first emitted joint target from
+  measured state on every RPC and derives each prefix's first gripper ramp from
+  measured width; it repeats both checks immediately before dispatch so state
+  drift across a mode transition cannot bypass the bound. Prior acknowledged
+  targets are diagnostic provenance only.
+- Fault/contact gates run before mode or actuator writes, pure prevalidation
+  failures preserve the acknowledged provenance cache, and server lifecycle
+  boundaries clear it.
+- Joint v3 numeric fields reject JSON strings and booleans instead of coercing
+  them into numbers.
 
 ## [0.2.2] - 2026-07-31
 

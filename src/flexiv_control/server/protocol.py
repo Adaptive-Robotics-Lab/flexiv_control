@@ -96,7 +96,14 @@ PROTOCOL_CONTRACT = {
         "rpc_identity_fields": ["protocol_id", "protocol_fingerprint_sha256"],
         "explicit_initial_target": ["initial_positions", "initial_gripper_width"],
         "strict_timing": "authoritative-n_frames-reject-no-clip-or-time-stretch",
-        "continuity": "server-last-ack-target-or-first-call-one-tick-measured-bound",
+        "continuity": "measured-rebase-every-rpc-prior-ack-provenance-only",
+        "first_emitted_joint_bound": "effective-runtime-rate-times-control-period",
+        "gripper_execution_anchor": "current-measured-width-every-rpc",
+        "predispatch_revalidation": [
+            "first-joint-setpoint-after-mode-transition",
+            "first-gripper-event-from-current-measured-width",
+        ],
+        "numeric_json_types": "numbers-and-arrays-only-no-strings-or-booleans",
         "gripper": "exact-Move-target-concurrent-at-segment-boundary",
         "interpolation": ["cosine", "linear"],
         "max_joint_speed_scale": "finite-(0,1]-active-profile-ceiling",
@@ -408,6 +415,27 @@ def _require_exact_keys(value: dict, expected: set[str], *, context: str) -> Non
         )
 
 
+def _require_json_number(value: Any, *, context: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{context} must be a JSON number (not a string or boolean)")
+    return float(value)
+
+
+def _require_optional_json_number(value: Any, *, context: str) -> Optional[float]:
+    if value is None:
+        return None
+    return _require_json_number(value, context=context)
+
+
+def _require_json_number_array(value: Any, *, context: str) -> list[float]:
+    if not isinstance(value, list):
+        raise ValueError(f"{context} must be a JSON array")
+    return [
+        _require_json_number(item, context=f"{context}[{index}]")
+        for index, item in enumerate(value)
+    ]
+
+
 def joint_gripper_target_to_dict(g: Optional[JointGripperTarget]) -> Optional[dict]:
     if g is None:
         return None
@@ -419,9 +447,11 @@ def joint_gripper_target_from_dict(d: Optional[dict]) -> Optional[JointGripperTa
         return None
     _require_exact_keys(d, {"width", "force", "velocity"}, context="JointGripperTarget")
     return JointGripperTarget(
-        width=float(d["width"]),
-        force=float(d["force"]),
-        velocity=None if d["velocity"] is None else float(d["velocity"]),
+        width=_require_json_number(d["width"], context="JointGripperTarget.width"),
+        force=_require_json_number(d["force"], context="JointGripperTarget.force"),
+        velocity=_require_optional_json_number(
+            d["velocity"], context="JointGripperTarget.velocity"
+        ),
     )
 
 
@@ -476,6 +506,19 @@ def joint_trajectory_from_dict(d: dict) -> JointTrajectory:
         raise ValueError("JointTrajectory.interpolation must be a string")
     if not isinstance(d["safety_profile"], str):
         raise ValueError("JointTrajectory.safety_profile must be a string")
+    initial_positions = (
+        None
+        if d["initial_positions"] is None
+        else _require_json_number_array(
+            d["initial_positions"], context="JointTrajectory.initial_positions"
+        )
+    )
+    initial_gripper_width = _require_optional_json_number(
+        d["initial_gripper_width"], context="JointTrajectory.initial_gripper_width"
+    )
+    max_joint_speed_scale = _require_json_number(
+        d["max_joint_speed_scale"], context="JointTrajectory.max_joint_speed_scale"
+    )
     wpts = []
     for index, w in enumerate(d["waypoints"]):
         _require_exact_keys(
@@ -483,23 +526,30 @@ def joint_trajectory_from_dict(d: dict) -> JointTrajectory:
             {"positions", "n_frames", "duration", "gripper"},
             context=f"JointWaypoint[{index}]",
         )
+        positions = _require_json_number_array(
+            w["positions"], context=f"JointWaypoint[{index}].positions"
+        )
+        n_frames = w["n_frames"]
+        if n_frames is not None and (isinstance(n_frames, bool) or not isinstance(n_frames, int)):
+            raise ValueError(f"JointWaypoint[{index}].n_frames must be a JSON integer or null")
+        duration = _require_optional_json_number(
+            w["duration"], context=f"JointWaypoint[{index}].duration"
+        )
         wpts.append(
             JointWaypoint(
-                positions=np.asarray(w["positions"], float),
-                n_frames=w["n_frames"],
-                duration=w["duration"],
+                positions=np.asarray(positions, float),
+                n_frames=n_frames,
+                duration=duration,
                 gripper=joint_gripper_target_from_dict(w["gripper"]),
             )
         )
     return JointTrajectory(
         waypoints=wpts,
         initial_positions=(
-            None if d["initial_positions"] is None else np.asarray(d["initial_positions"], float)
+            None if initial_positions is None else np.asarray(initial_positions, float)
         ),
-        initial_gripper_width=(
-            None if d["initial_gripper_width"] is None else float(d["initial_gripper_width"])
-        ),
-        max_joint_speed_scale=float(d["max_joint_speed_scale"]),
+        initial_gripper_width=initial_gripper_width,
+        max_joint_speed_scale=max_joint_speed_scale,
         interpolation=d["interpolation"],
         strict_timing=d["strict_timing"],
         safety_profile=d["safety_profile"],

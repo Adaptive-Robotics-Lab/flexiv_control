@@ -142,13 +142,22 @@ provided gripper velocity must equal the velocity that realizes its width delta
 in the same segment; `None` derives it. Position-mode `Gripper.Move` is issued
 fire-and-forget at the segment boundary, then the arm streams concurrently.
 
-On the first explicit call, knot 0 must be within one safe controller tick of
-measured state. After a successful response, the next call's knot 0 must match
-`result.log["acknowledged_ending_joint_target"]` (and the acknowledged gripper
-target) exactly within protocol tolerance. Stop, fault, lease changes, mode
-changes, and any other mutating motion/gripper RPC clear that continuity cache.
-The result log also includes requested/scheduled segment and total ticks,
-initial/ending targets, gripper events, and measured gripper tracking.
+Knot 0 need not equal the prior commanded endpoint because it is not streamed.
+Every feedback-MPC call rebases its joint safety filter and first gripper ramp to
+current measured state. The actual first interpolated joint target must be
+reachable from that measurement in one controller tick under the effective
+per-joint rate limits; gripper velocity is likewise derived and validated from
+current measured width. This permits the next plan's knot 0 to reflect ordinary
+tracking error without hiding a command jump. The previous acknowledged joint
+and gripper targets remain in the result log as provenance, not an admission
+gate. The executor repeats the first-setpoint check on the freshest snapshot
+after any mode transition, immediately before actuator writes, and recomputes
+the first gripper-event ramp from width measured at dispatch. Stop, fault, lease
+changes, mode changes, and other mutating RPCs clear
+that provenance cache. A payload rejected completely during prevalidation
+leaves it intact for diagnosis. The result log also includes requested/scheduled
+segment and total ticks, interpolation and execution anchors, gripper events,
+and measured gripper tracking.
 
 ## Safety notes for MPC
 
