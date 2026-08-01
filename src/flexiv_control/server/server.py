@@ -66,12 +66,14 @@ class FlexivControlServer:
         self.lease = Lease(ttl_seconds=lease_ttl)
         # Host-wide single-owner lock (across OS processes), in addition to the
         # in-process client Lease. None to disable (e.g. tests / multi-arm hosts).
-        self._host_lock = (
-            HostLock(self.robot.cfg.robot_id, owner="server") if host_lock else None
-        )
+        self._host_lock = HostLock(self.robot.cfg.robot_id, owner="server") if host_lock else None
         self._robot_lock = threading.Lock()
         self._servo_loop: Optional[ReactiveServoLoop] = None  # single-writer streaming
         self._tcp: Optional[socketserver.ThreadingTCPServer] = None
+        # Last target acknowledged by a successful joint-trajectory RPC.
+        self._last_ack_joint_target: Optional[np.ndarray] = None
+        self._last_ack_gripper_target: Optional[float] = None
+        self._joint_target_owner: str = ""
         self._handlers: Dict[str, Callable[[dict], Any]] = self._build_handlers()
 
     # -- lifecycle -----------------------------------------------------------
@@ -144,6 +146,90 @@ class FlexivControlServer:
             self.robot.disconnect()
             if self._host_lock is not None:
                 self._host_lock.release()
+
+    def _reset_joint_target_continuity(self) -> None:
+        self._last_ack_joint_target = None
+        self._last_ack_gripper_target = None
+        self._joint_target_owner = ""
+
+    def _validate_joint_target_continuity(self, owner: str, traj) -> str:
+        """Validate knot 0 without substituting measured tracking state."""
+        if traj.initial_positions is None:
+            # Explicit legacy mode deliberately starts from measured q and
+            # cannot participate in acknowledged-target chaining.
+            self._reset_joint_target_continuity()
+            return "legacy_measured"
+        initial = np.asarray(traj.initial_positions, float)
+        if self._last_ack_joint_target is not None:
+            if self._joint_target_owner != owner:
+                self._reset_joint_target_continuity()
+                raise ValueError("joint target continuity owner changed")
+            if initial.shape != self._last_ack_joint_target.shape:
+                raise ValueError(
+                    "initial_positions shape does not match the last acknowledged "
+                    f"joint target: {initial.shape} != "
+                    f"{self._last_ack_joint_target.shape}"
+                )
+            delta = np.abs(initial - self._last_ack_joint_target)
+            if np.any(delta > 1e-9):
+                raise ValueError(
+                    "initial_positions does not match the last acknowledged "
+                    f"joint target (max error {float(np.max(delta)):.9g} rad)"
+                )
+            if traj.initial_gripper_width is not None:
+                if self._last_ack_gripper_target is None:
+                    raise ValueError(
+                        "initial_gripper_width cannot chain from a prior RPC "
+                        "without an acknowledged gripper target"
+                    )
+                grip_error = abs(float(traj.initial_gripper_width) - self._last_ack_gripper_target)
+                if grip_error > 1e-9:
+                    raise ValueError(
+                        "initial_gripper_width does not match the last acknowledged "
+                        f"gripper target (error {grip_error:.9g} m)"
+                    )
+            return "last_acknowledged_target"
+
+        state = self.robot.get_state()
+        if initial.shape != state.q.shape:
+            raise ValueError(
+                f"initial_positions shape {initial.shape} does not match measured "
+                f"q shape {state.q.shape}"
+            )
+        one_tick = (
+            self.robot._joint_velocity_limits  # noqa: SLF001
+            * float(traj.max_joint_speed_scale)
+            / float(self.robot.control_hz)
+        )
+        delta = np.abs(initial - state.q)
+        if np.any(delta > one_tick + 1e-12):
+            joint = int(np.flatnonzero(delta > one_tick + 1e-12)[0])
+            raise ValueError(
+                "first explicit initial_positions exceeds the one-tick measured "
+                f"continuity bound at joint {joint}: error {delta[joint]:.9g} rad > "
+                f"{one_tick[joint]:.9g} rad"
+            )
+        if traj.initial_gripper_width is not None:
+            limits = self.robot.backend.runtime_info().get("gripper_limits")
+            if limits is not None:
+                width_error = abs(float(traj.initial_gripper_width) - state.gripper_width)
+                grip_tick = float(limits["max_velocity_m_s"]) / self.robot.control_hz
+                if width_error > grip_tick + 1e-12:
+                    raise ValueError(
+                        "first explicit initial_gripper_width exceeds the one-tick "
+                        f"measured continuity bound: error {width_error:.9g} m > "
+                        f"{grip_tick:.9g} m"
+                    )
+        return "first_call_measured_one_tick"
+
+    def _ack_joint_target(self, owner: str, traj) -> None:
+        self._last_ack_joint_target = traj.waypoints[-1].positions.copy()
+        width = traj.initial_gripper_width
+        for waypoint in traj.waypoints:
+            if waypoint.gripper is not None:
+                width = waypoint.gripper.width
+        self._last_ack_gripper_target = None if width is None else float(width)
+        self._joint_target_owner = owner
 
     # -- dispatch ------------------------------------------------------------
     def _dispatch(self, req: dict) -> dict:
@@ -243,8 +329,10 @@ class FlexivControlServer:
         # motion was in flight, cancel that motion (next tick) -- otherwise the
         # victim's traj keeps streaming to completion under the thief's lease.
         if force and prev and prev != info.owner:
+            self._reset_joint_target_continuity()
             self.robot.request_stop()
         elif prev != info.owner:
+            self._reset_joint_target_continuity()
             # A FRESH owner must not inherit the cancel latched by the
             # previous session (a client disconnect requests a safety stop;
             # with no motion in flight nothing consumes it, and it would
@@ -255,6 +343,7 @@ class FlexivControlServer:
 
     def _h_release_lease(self, p: dict) -> dict:
         self.lease.release(p.get("owner", ""))
+        self._reset_joint_target_continuity()
         # Releasing the lease must also tear down an always-on servo loop, else
         # it would keep writing to the arm with no lease holder (orphan writer).
         with self._robot_lock:
@@ -263,6 +352,7 @@ class FlexivControlServer:
             loop.stop()
         with self._robot_lock:
             self.robot.stop()
+            self._reset_joint_target_continuity()
         return {"released": True}
 
     def _h_heartbeat(self, p: dict) -> dict:
@@ -272,6 +362,7 @@ class FlexivControlServer:
     def _h_set_safety_profile(self, p: dict) -> dict:
         self._require_lease(p)
         with self._robot_lock:
+            self._reset_joint_target_continuity()
             self.robot.set_safety_profile(p["name"])
         return {"profile": self.robot.profile.name}
 
@@ -314,12 +405,11 @@ class FlexivControlServer:
         if "stiffness" in p:
             imp = ImpedanceParams(
                 stiffness=np.asarray(p["stiffness"], float),
-                damping_ratio=np.asarray(
-                    p.get("damping_ratio", [0.7] * 6), float
-                ),
+                damping_ratio=np.asarray(p.get("damping_ratio", [0.7] * 6), float),
             )
         ns = None if p.get("nullspace_q") is None else np.asarray(p["nullspace_q"], float)
         with self._motion_lock(owner):
+            self._reset_joint_target_continuity()
             self.robot.start_cartesian_impedance(
                 impedance=imp, realtime=bool(p.get("realtime", False)), nullspace_q=ns
             )
@@ -328,12 +418,14 @@ class FlexivControlServer:
     def _h_start_joint_impedance(self, p: dict) -> dict:
         owner = self._require_lease(p)
         with self._motion_lock(owner):
+            self._reset_joint_target_continuity()
             self.robot.start_joint_impedance(realtime=bool(p.get("realtime", False)))
         return {"started": True}
 
     def _h_servo_cartesian_delta(self, p: dict) -> dict:
         owner = self._require_lease(p)
         with self._motion_lock(owner):
+            self._reset_joint_target_continuity()
             r = self.robot.servo_cartesian_delta(
                 np.asarray(p["delta"], float),
                 duration=p.get("duration"),
@@ -345,6 +437,7 @@ class FlexivControlServer:
     def _h_servo_cartesian_pose(self, p: dict) -> dict:
         owner = self._require_lease(p)
         with self._motion_lock(owner):
+            self._reset_joint_target_continuity()
             r = self.robot.servo_cartesian_pose(
                 np.asarray(p["pose"], float),
                 duration=float(p.get("duration", 0.2)),
@@ -356,19 +449,43 @@ class FlexivControlServer:
         owner = self._require_lease(p)
         traj = P.trajectory_from_dict(p["traj"])
         with self._motion_lock(owner):
+            self._reset_joint_target_continuity()
             r = self.robot.execute_cartesian_trajectory(traj, blocking=True)
         return {"result": P.result_to_dict(r)}
 
     def _h_execute_joint_trajectory(self, p: dict) -> dict:
         owner = self._require_lease(p)
+        if p.get("protocol_id") != P.PROTOCOL_ID:
+            raise ValueError(f"protocol_id must be {P.PROTOCOL_ID!r}; old joint payload refused")
+        if p.get("protocol_fingerprint_sha256") != P.PROTOCOL_FINGERPRINT_SHA256:
+            raise ValueError(
+                "protocol_fingerprint_sha256 mismatch; joint contract must match exactly"
+            )
         traj = P.joint_trajectory_from_dict(p["traj"])
         with self._motion_lock(owner):
-            r = self.robot.execute_joint_trajectory(traj)
+            continuity = self._validate_joint_target_continuity(owner, traj)
+            try:
+                r = self.robot.execute_joint_trajectory(traj)
+            except Exception:
+                self._reset_joint_target_continuity()
+                raise
+            r.log["continuity_source"] = continuity
+            if r.success and traj.initial_positions is not None:
+                self._ack_joint_target(owner, traj)
+                r.log["acknowledged_ending_joint_target"] = self._last_ack_joint_target.tolist()
+                r.log["acknowledged_ending_gripper_target_m"] = self._last_ack_gripper_target
+            elif r.success:
+                self._reset_joint_target_continuity()
+                r.log["continuity_reset"] = "legacy_measured"
+            else:
+                self._reset_joint_target_continuity()
+                r.log["continuity_reset"] = r.stop_reason
         return {"result": P.result_to_dict(r)}
 
     def _h_move_joint(self, p: dict) -> dict:
         owner = self._require_lease(p)
         with self._motion_lock(owner):
+            self._reset_joint_target_continuity()
             r = self.robot.move_joint(
                 np.asarray(p["q"], float),
                 duration=None if p.get("duration") is None else float(p["duration"]),
@@ -384,15 +501,15 @@ class FlexivControlServer:
         g = P.gripper_from_dict(p["gripper"]) or GripperCommand()
         wait = bool(p.get("wait", False))
         with self._motion_lock(owner):
-            w = self.robot.command_gripper(
-                g, wait=wait, timeout=float(p.get("timeout", 5.0))
-            )
+            self._reset_joint_target_continuity()
+            w = self.robot.command_gripper(g, wait=wait, timeout=float(p.get("timeout", 5.0)))
         return {"ok": True, "final_width": w}
 
     def _h_home(self, p: dict) -> dict:
         owner = self._require_lease(p)
         q = None if p.get("q") is None else np.asarray(p["q"], float)
         with self._motion_lock(owner):
+            self._reset_joint_target_continuity()
             self.robot.home(
                 q,
                 max_joint_speed=(
@@ -412,13 +529,12 @@ class FlexivControlServer:
         owner = self._require_lease(p)
         q = None if p.get("q_home") is None else np.asarray(p["q_home"], float)
         with self._motion_lock(owner):
+            self._reset_joint_target_continuity()
             r = self.robot.go_home_safe(
                 q_home=q,
                 lift_m=float(p.get("lift_m", 0.10)),
                 open_gripper_width=(
-                    None
-                    if p.get("open_gripper_width") is None
-                    else float(p["open_gripper_width"])
+                    None if p.get("open_gripper_width") is None else float(p["open_gripper_width"])
                 ),
                 max_tcp_speed=float(p.get("max_tcp_speed", 0.10)),
                 max_joint_speed=float(p.get("max_joint_speed", 0.3)),
@@ -426,6 +542,7 @@ class FlexivControlServer:
         return {"result": P.result_to_dict(r)}
 
     def _h_stop(self, p: dict) -> dict:
+        self._reset_joint_target_continuity()
         # stop does not require the lease -- anyone may e-stop. First request a
         # cooperative cancel so an in-flight blocking traj aborts at its next
         # tick (the executing thread performs the backend stop itself -- we never
@@ -454,6 +571,7 @@ class FlexivControlServer:
             # Lock busy: an executing traj will see the cancel at its next
             # tick. Re-set it in case a traj entry consumed it racing us.
             self.robot.request_stop()
+        self._reset_joint_target_continuity()
         return {"stopped": True}
 
     # -- always-on single-writer streaming loop (hold-on-stale) -------------
@@ -461,6 +579,7 @@ class FlexivControlServer:
         self._require_lease(p)
         with self._robot_lock:
             if self._servo_loop is None:
+                self._reset_joint_target_continuity()
                 # Share _robot_lock with the loop so its per-tick writes and the
                 # handlers' writes are mutually exclusive (single writer).
                 loop = ReactiveServoLoop(

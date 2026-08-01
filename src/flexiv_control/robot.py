@@ -160,10 +160,7 @@ class Robot:
                 dtype=float,
             ).reshape(-1)
             if not (
-                runtime_lower.shape
-                == runtime_upper.shape
-                == runtime_velocity.shape
-                == lower.shape
+                runtime_lower.shape == runtime_upper.shape == runtime_velocity.shape == lower.shape
             ):
                 raise RuntimeError(
                     "runtime RobotInfo joint limit dimensions do not match "
@@ -178,8 +175,7 @@ class Robot:
             # 2 rad/s assumption.
             if self.backend.is_connected:
                 raise RuntimeError(
-                    "connected Flexiv RDK backend did not provide runtime "
-                    "joint limits"
+                    "connected Flexiv RDK backend did not provide runtime joint limits"
                 )
 
         current = backend_info.get("current_safety_limits")
@@ -208,8 +204,7 @@ class Robot:
                 == lower.shape
             ):
                 raise RuntimeError(
-                    "runtime SafetyLimits dimensions do not match the "
-                    "configured safety profile"
+                    "runtime SafetyLimits dimensions do not match the configured safety profile"
                 )
             lower = np.maximum(lower, current_lower)
             upper = np.minimum(upper, current_upper)
@@ -219,25 +214,16 @@ class Robot:
                 velocity,
                 np.minimum(current_normal, current_reduced),
             )
-            sources.append(
-                str(current.get("source", "current_safety_limits"))
-            )
+            sources.append(str(current.get("source", "current_safety_limits")))
 
         if (
             not np.all(np.isfinite(lower))
             or not np.all(np.isfinite(upper))
             or np.any(lower >= upper)
         ):
-            raise RuntimeError(
-                "effective joint position limit intersection is invalid"
-            )
-        if (
-            not np.all(np.isfinite(velocity))
-            or np.any(velocity <= 0.0)
-        ):
-            raise RuntimeError(
-                "effective per-joint velocity limits are invalid"
-            )
+            raise RuntimeError("effective joint position limit intersection is invalid")
+        if not np.all(np.isfinite(velocity)) or np.any(velocity <= 0.0):
+            raise RuntimeError("effective per-joint velocity limits are invalid")
 
         self.profile.joint_lower = lower
         self.profile.joint_upper = upper
@@ -247,9 +233,7 @@ class Robot:
         enforced_lower = lower + self.profile.joint_margin_rad
         enforced_upper = upper - self.profile.joint_margin_rad
         if np.any(enforced_lower >= enforced_upper):
-            raise RuntimeError(
-                "joint margin collapses the effective position interval"
-            )
+            raise RuntimeError("joint margin collapses the effective position interval")
         contract = {
             "sources": sources,
             "hard_position_min_rad": lower.tolist(),
@@ -257,9 +241,7 @@ class Robot:
             "enforced_position_min_rad": enforced_lower.tolist(),
             "enforced_position_max_rad": enforced_upper.tolist(),
             "base_velocity_max_rad_s": velocity.tolist(),
-            "max_joint_speed_scale": float(
-                self.profile.max_joint_speed_scale
-            ),
+            "max_joint_speed_scale": float(self.profile.max_joint_speed_scale),
         }
         payload = json.dumps(
             contract,
@@ -286,9 +268,7 @@ class Robot:
             if value is not None:
                 info[key] = value
         if self._effective_joint_contract is not None:
-            info["effective_joint_limits"] = dict(
-                self._effective_joint_contract
-            )
+            info["effective_joint_limits"] = dict(self._effective_joint_contract)
         return info
 
     def disconnect(self) -> None:
@@ -389,20 +369,28 @@ class Robot:
         state = self.get_state()
         target = delta_to_target_pose(delta, state.tcp_pose)
         wp = CartesianWaypoint(
-            position=target[:3], quaternion=target[3:7],
-            gripper=delta.gripper, duration=delta.duration, frame=delta.frame,
+            position=target[:3],
+            quaternion=target[3:7],
+            gripper=delta.gripper,
+            duration=delta.duration,
+            frame=delta.frame,
         )
-        traj = CartesianTrajectory(waypoints=[wp], frame=delta.frame,
-                               safety_profile=self.profile.name)
+        traj = CartesianTrajectory(
+            waypoints=[wp], frame=delta.frame, safety_profile=self.profile.name
+        )
         return self.execute_cartesian_trajectory(traj, blocking=True)
 
     def servo_cartesian_pose(
-        self, pose: np.ndarray, *, duration: float = 0.2,
+        self,
+        pose: np.ndarray,
+        *,
+        duration: float = 0.2,
         gripper: Optional[GripperCommand] = None,
     ) -> ExecutionResult:
         pose = np.asarray(pose, float).reshape(7)
-        wp = CartesianWaypoint(position=pose[:3], quaternion=pose[3:7],
-                               gripper=gripper, duration=duration)
+        wp = CartesianWaypoint(
+            position=pose[:3], quaternion=pose[3:7], gripper=gripper, duration=duration
+        )
         return self.execute_cartesian_trajectory(
             CartesianTrajectory(waypoints=[wp], safety_profile=self.profile.name), blocking=True
         )
@@ -499,8 +487,7 @@ class Robot:
             # Held-payload headroom: server-clamped to the profile's granted
             # ceiling (default zero), then ADDED to the profile cap. The traj
             # request is a request, never an override.
-            allow = np.minimum(traj.contact_wrench_allowance,
-                               self.profile.max_wrench_allowance)
+            allow = np.minimum(traj.contact_wrench_allowance, self.profile.max_wrench_allowance)
             if np.any(allow > 0):
                 wrench_cap = wrench_cap + allow
                 wrench_relaxed = True
@@ -543,8 +530,11 @@ class Robot:
             healthy arm converges to a few mm while a contact-stalled arm
             still shows the full remaining descend distance."""
             nonlocal close_aborted, close_issued
-            err_now = (float(np.linalg.norm(prev_cmd_pos - state.tcp_position))
-                       if prev_cmd_pos is not None else 0.0)
+            err_now = (
+                float(np.linalg.norm(prev_cmd_pos - state.tcp_position))
+                if prev_cmd_pos is not None
+                else 0.0
+            )
             if close_aborted or result.clipped or err_now > traj.grip_tracking_gate_m:
                 if not close_aborted:
                     close_aborted = True
@@ -582,8 +572,7 @@ class Robot:
                     result.success = False
                     result.stop_reason = StopReason.CONTACT_WRENCH.value
                     break
-                sr = self.filter.filter_cartesian(pose, state,
-                                                  max_contact_wrench=wrench_cap)
+                sr = self.filter.filter_cartesian(pose, state, max_contact_wrench=wrench_cap)
                 if not sr.ok:
                     self.backend.stop()
                     result.success = False
@@ -613,7 +602,8 @@ class Robot:
                     # reading.
                     closing = bool(grip.grasp) or (
                         float(state.gripper_width) > 1e-6
-                        and grip.width < float(state.gripper_width) - 1e-3)
+                        and grip.width < float(state.gripper_width) - 1e-3
+                    )
                     # NEVER gate a grasp=True SUSTAIN once a close was actually
                     # issued this traj: the object is (potentially) between the
                     # fingers, and skipping the force-closure hand-off leaves
@@ -621,8 +611,9 @@ class Robot:
                     # failure -- while mislabeling a physical grasp as
                     # "no close fired". The gate exists to prevent closing at an
                     # UNPLANNED height; after a close it has done its job.
-                    gate_active = (traj.grip_tracking_gate_m is not None
-                                   and not (grip.grasp and close_issued))
+                    gate_active = traj.grip_tracking_gate_m is not None and not (
+                        grip.grasp and close_issued
+                    )
                     if closing and gate_active:
                         if close_aborted:
                             pass  # sticky: a skipped close invalidates the rest
@@ -637,15 +628,20 @@ class Robot:
                                 _try_fire_close(g, state)
                             settle = min(
                                 int(round(GRIP_GATE_SETTLE_S * self.control_hz)),
-                                max(1, int(interp.current_segment_ticks) // 2))
+                                max(1, int(interp.current_segment_ticks) // 2),
+                            )
                             pending_close = (grip, tick_idx + settle)
                     else:
                         self.backend.move_gripper(grip)
                         close_issued = close_issued or closing
                 if trajectory is not None:
                     trajectory.append(
-                        [time.perf_counter() - t0, *sr.pose.tolist(),
-                         *state.tcp_pose.tolist(), *state.wrench.tolist()]
+                        [
+                            time.perf_counter() - t0,
+                            *sr.pose.tolist(),
+                            *state.tcp_pose.tolist(),
+                            *state.wrench.tolist(),
+                        ]
                     )
 
                 # bookkeeping. path_tracking_error is the lag between the PREVIOUS
@@ -763,8 +759,6 @@ class Robot:
         self._check_lease()
         result = ExecutionResult(success=True)
         if self._cancel.is_set():
-            # A pending stop aborts THIS traj rather than being silently
-            # erased (same consume-on-abort semantics as the Cartesian path).
             self._cancel.clear()
             result.success = False
             result.stop_reason = StopReason.USER.value
@@ -784,38 +778,151 @@ class Robot:
                 f"{requested_speed_scale:.9g} exceeds active safety-profile "
                 f"ceiling {active_speed_scale:.9g}"
             )
-        # A lower per-trajectory maximum is safe and must be honoured. The
-        # active profile remains the independent server-side ceiling.
         effective_speed_scale = requested_speed_scale
         result.log["effective_max_joint_speed_scale"] = effective_speed_scale
         result.log["joint_interpolation"] = traj.interpolation
-        start = self.get_state()
-        if start.control_mode.is_cartesian or start.control_mode == ControlMode.IDLE:
-            self.start_joint_impedance()
-            result.log["mode_autostarted"] = True
-            start = self.get_state()
-        self.filter.reset(start)
+        result.log["strict_timing"] = traj.strict_timing
+
+        # Read measured state once, then prevalidate the entire atomic RPC before
+        # any mode switch, gripper Move, or arm setpoint can reach the backend.
+        start_state = self.get_state()
+        initial_q = (
+            start_state.q.copy()
+            if traj.initial_positions is None
+            else np.asarray(traj.initial_positions, float).reshape(-1).copy()
+        )
+        if initial_q.shape != start_state.q.shape:
+            raise ValueError(
+                f"initial_positions must match measured q shape {start_state.q.shape}, "
+                f"got {initial_q.shape}"
+            )
+        effective_joint_speed = self._joint_velocity_limits * effective_speed_scale
         interp = JointTrajectoryInterpolator(
             traj,
-            start.q,
+            initial_q,
             self.control_hz,
-            max_joint_speed=(
-                self._joint_velocity_limits * effective_speed_scale
-            ),
+            max_joint_speed=effective_joint_speed,
         )
-        result.log["base_joint_velocity_limits_rad_s"] = (
-            self._joint_velocity_limits.tolist()
+
+        joint_lo = self.profile.joint_lower + self.profile.joint_margin_rad
+        joint_hi = self.profile.joint_upper - self.profile.joint_margin_rad
+        if traj.strict_timing:
+            for label, target in [
+                ("initial_positions", initial_q),
+                *[
+                    (f"waypoints[{i}].positions", wp.positions)
+                    for i, wp in enumerate(traj.waypoints)
+                ],
+            ]:
+                if np.any(target < joint_lo) or np.any(target > joint_hi):
+                    raise ValueError(
+                        f"strict_timing {label} exceeds effective joint position limits"
+                    )
+
+        initial_gripper = (
+            start_state.gripper_width
+            if traj.initial_gripper_width is None
+            else float(traj.initial_gripper_width)
         )
-        if self._effective_joint_contract is not None:
-            result.log["effective_joint_limits_sha256"] = (
-                self._effective_joint_contract["sha256"]
+        runtime_gripper = self.backend.runtime_info().get("gripper_limits")
+        if runtime_gripper is not None:
+            width_lo = float(runtime_gripper["min_width_m"])
+            width_hi = float(runtime_gripper["max_width_m"])
+            if not width_lo <= initial_gripper <= width_hi:
+                raise ValueError(
+                    f"initial_gripper_width={initial_gripper!r} outside runtime "
+                    f"[{width_lo}, {width_hi}] from flexivrdk.Gripper.params"
+                )
+        gripper_events: list[dict] = []
+        previous_width = initial_gripper
+        boundary_tick = 0
+        for segment, (wp, requested_ticks, scheduled_ticks) in enumerate(
+            zip(
+                traj.waypoints,
+                interp.requested_segment_ticks,
+                interp.scheduled_segment_ticks,
             )
-        result.log["requested_duration_s"] = interp.requested_duration_s
-        result.log["nominal_scheduled_ticks"] = interp.nominal_total_ticks
+        ):
+            boundary_tick += scheduled_ticks
+            if wp.gripper is None:
+                continue
+            target = wp.gripper
+            delta_width = abs(target.width - previous_width)
+            segment_duration = scheduled_ticks * self.dt
+            required_velocity = delta_width / segment_duration
+            velocity = required_velocity if target.velocity is None else target.velocity
+            if delta_width > 1e-12 and target.velocity is not None:
+                if not np.isclose(target.velocity, required_velocity, rtol=1e-6, atol=1e-9):
+                    raise ValueError(
+                        f"JointWaypoint {segment} gripper velocity {target.velocity:.9g} "
+                        f"m/s does not realize width delta {delta_width:.9g} m in "
+                        f"scheduled n_frames={scheduled_ticks}; required "
+                        f"{required_velocity:.9g} m/s"
+                    )
+            if runtime_gripper is not None:
+                checks = [
+                    ("width", target.width, "min_width_m", "max_width_m"),
+                    ("force", target.force, "min_force_n", "max_force_n"),
+                ]
+                if delta_width > 1e-12:
+                    checks.append(("velocity", velocity, "min_velocity_m_s", "max_velocity_m_s"))
+                for field, value, lo_key, hi_key in checks:
+                    lo = float(runtime_gripper[lo_key])
+                    hi = float(runtime_gripper[hi_key])
+                    if not np.isfinite(value) or not lo <= value <= hi:
+                        raise ValueError(
+                            f"JointWaypoint {segment} gripper {field}={value!r} "
+                            f"outside runtime [{lo}, {hi}] from "
+                            "flexivrdk.Gripper.params"
+                        )
+            gripper_events.append(
+                {
+                    "segment": segment,
+                    "requested_segment_ticks": requested_ticks,
+                    "scheduled_segment_ticks": scheduled_ticks,
+                    "start_tick": boundary_tick - scheduled_ticks,
+                    "end_tick": boundary_tick,
+                    "start_width_m": previous_width,
+                    "target_width_m": target.width,
+                    "velocity_m_s": velocity,
+                    "force_n": target.force,
+                    "dispatch": delta_width > 1e-12,
+                }
+            )
+            previous_width = target.width
+
+        result.log["base_joint_velocity_limits_rad_s"] = self._joint_velocity_limits.tolist()
+        if self._effective_joint_contract is not None:
+            result.log["effective_joint_limits_sha256"] = self._effective_joint_contract["sha256"]
         result.log["control_hz"] = float(self.control_hz)
+        result.log["requested_duration_s"] = interp.requested_duration_s
+        result.log["requested_segment_ticks"] = list(interp.requested_segment_ticks)
+        result.log["requested_total_ticks"] = int(interp.requested_total_ticks)
+        result.log["scheduled_segment_ticks"] = list(interp.scheduled_segment_ticks)
+        result.log["scheduled_total_ticks"] = int(interp.scheduled_total_ticks)
+        result.log["scheduled_duration_s"] = float(interp.scheduled_total_ticks * self.dt)
+        result.log["initial_joint_target"] = initial_q.tolist()
+        result.log["ending_joint_target"] = traj.waypoints[-1].positions.tolist()
+        result.log["initial_gripper_target_m"] = initial_gripper
+        result.log["ending_gripper_target_m"] = previous_width
+        result.log["gripper_events"] = gripper_events
+        result.log["gripper_tracking"] = []
+
+        if start_state.control_mode.is_cartesian or start_state.control_mode == ControlMode.IDLE:
+            self.start_joint_impedance()
+            result.log["mode_autostarted"] = True
+            start_state = self.get_state()
+        # Command continuity is against explicit knot 0, not measured tracking.
+        self.filter.reset(start_state, q=initial_q)
+
+        events_by_segment = {event["segment"]: event for event in gripper_events}
+        active_gripper_target = initial_gripper
         t_loop = time.perf_counter()
         execution_started = t_loop
         streamed_ticks = 0
+        max_joint_speed = 0.0
+        max_tracking_error = 0.0
+        previous_command = initial_q
         for q in interp:
             if self._cancel.is_set():
                 self._cancel.clear()
@@ -824,9 +931,6 @@ class Robot:
                 result.stop_reason = StopReason.USER.value
                 break
             state = self.get_state()
-            # The recovery/home path is the one most likely to run from an
-            # abnormal pose: give joint moves the same robot-fault and
-            # contact-wrench gates the Cartesian path has.
             if self.backend.in_fault():
                 self.backend.stop()
                 result.success = False
@@ -837,32 +941,58 @@ class Robot:
                 result.success = False
                 result.stop_reason = StopReason.CONTACT_WRENCH.value
                 break
+            if interp.current_segment_tick == 1:
+                event = events_by_segment.get(interp.current_segment)
+                if event is not None:
+                    event["measured_width_at_dispatch_m"] = state.gripper_width
+                    if event["dispatch"]:
+                        self.backend.move_gripper(
+                            GripperCommand(
+                                width=event["target_width_m"],
+                                force=event["force_n"],
+                                velocity=event["velocity_m_s"],
+                                grasp=False,
+                            )
+                        )
+                    active_gripper_target = event["target_width_m"]
             sr = self.filter.filter_joint(q, state)
-            if not sr.ok:
+            if not sr.ok or (traj.strict_timing and sr.clipped):
                 self.backend.stop()
                 result.success = False
-                result.stop_reason = sr.reason.value
+                result.stop_reason = sr.reason.value if not sr.ok else StopReason.JOINT_LIMIT.value
+                result.log["strict_runtime_clip_refused"] = bool(sr.clipped)
                 break
             if sr.clipped:
                 result.clipped = True
             self.backend.stream_joint(sr.q)
             streamed_ticks += 1
+            max_joint_speed = max(
+                max_joint_speed,
+                float(np.max(np.abs(sr.q - previous_command)) / self.dt),
+            )
+            max_tracking_error = max(max_tracking_error, float(np.linalg.norm(sr.q - state.q)))
+            previous_command = sr.q.copy()
+            result.log["gripper_tracking"].append(
+                {
+                    "tick": streamed_ticks,
+                    "target_width_m": active_gripper_target,
+                    "measured_width_m": state.gripper_width,
+                    "error_m": active_gripper_target - state.gripper_width,
+                }
+            )
             t_loop += self.dt
             sleep = t_loop - time.perf_counter()
             if sleep > 0:
                 time.sleep(sleep)
         result.executed_duration = time.perf_counter() - execution_started
-        result.log["scheduled_segment_ticks"] = list(
-            interp.scheduled_segment_ticks
-        )
-        result.log["scheduled_total_ticks"] = int(
-            interp.scheduled_total_ticks
-        )
-        result.log["scheduled_duration_s"] = float(
-            interp.scheduled_total_ticks * self.dt
-        )
         result.log["streamed_ticks"] = int(streamed_ticks)
+        result.path_tracking_error = max_tracking_error
+        result.max_joint_speed = max_joint_speed
         result.final_state = self.get_state()
+        result.gripper_width_final = result.final_state.gripper_width
+        result.log["final_gripper_tracking_error_m"] = (
+            previous_width - result.final_state.gripper_width
+        )
         if raise_on_stop and not result.success:
             raise TrajectoryStoppedError(result)
         return result
@@ -1012,7 +1142,8 @@ class Robot:
             result = ExecutionResult(
                 success=False,
                 stop_reason=(
-                    StopReason.USER.value if self._cancel.is_set()
+                    StopReason.USER.value
+                    if self._cancel.is_set()
                     else StopReason.CONTACT_WRENCH.value
                 ),
             )

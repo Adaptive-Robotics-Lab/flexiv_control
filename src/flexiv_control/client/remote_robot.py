@@ -117,11 +117,19 @@ class RemoteRobot:
     # Methods whose server-side handler can legitimately block for the duration
     # of a real robot motion: read them with `motion_timeout` instead of the
     # short default.
-    _MOTION_METHODS = frozenset({
-        "execute_cartesian_trajectory", "execute_joint_trajectory", "move_joint",
-        "servo_cartesian_delta", "servo_cartesian_pose",
-        "command_gripper", "home", "go_home_safe", "zero_ft_sensor",
-    })
+    _MOTION_METHODS = frozenset(
+        {
+            "execute_cartesian_trajectory",
+            "execute_joint_trajectory",
+            "move_joint",
+            "servo_cartesian_delta",
+            "servo_cartesian_pose",
+            "command_gripper",
+            "home",
+            "go_home_safe",
+            "zero_ft_sensor",
+        }
+    )
 
     def _call(self, method: str, **params) -> dict:
         if self._wfile is None or self._rfile is None:
@@ -220,9 +228,7 @@ class RemoteRobot:
         """Return the remote package/protocol identity without taking a lease."""
         info = self._call("get_server_info")
         if not isinstance(info, dict):
-            raise RemoteRobotError(
-                "get_server_info returned a non-object response"
-            )
+            raise RemoteRobotError("get_server_info returned a non-object response")
         return info
 
     def set_safety_profile(self, name: str) -> None:
@@ -311,8 +317,23 @@ class RemoteRobot:
     def execute_joint_trajectory(
         self, traj: JointTrajectory, *, raise_on_stop: bool = False
     ) -> ExecutionResult:
+        # Fail closed before motion when an older server would silently ignore
+        # explicit knot 0 or strict timing fields.
+        info = self.get_server_info()
+        if (
+            info.get("protocol_id") != P.PROTOCOL_ID
+            or info.get("protocol_fingerprint_sha256") != P.PROTOCOL_FINGERPRINT_SHA256
+        ):
+            raise RemoteRobotError(
+                "joint trajectory protocol mismatch: client requires "
+                f"{P.PROTOCOL_ID} fingerprint {P.PROTOCOL_FINGERPRINT_SHA256}"
+            )
         r = self._call(
-            "execute_joint_trajectory", owner=self.owner, traj=P.joint_trajectory_to_dict(traj)
+            "execute_joint_trajectory",
+            owner=self.owner,
+            protocol_id=P.PROTOCOL_ID,
+            protocol_fingerprint_sha256=P.PROTOCOL_FINGERPRINT_SHA256,
+            traj=P.joint_trajectory_to_dict(traj),
         )
         result = P.result_from_dict(r["result"])
         if raise_on_stop and not result.success:
@@ -417,7 +438,8 @@ class RemoteRobot:
 
     def servo_stream(self, pose, gripper: Optional[GripperCommand] = None) -> None:
         self._call(
-            "servo_stream", owner=self.owner,
+            "servo_stream",
+            owner=self.owner,
             pose=np.asarray(pose, float).reshape(7).tolist(),
             gripper=P.gripper_to_dict(gripper),
         )

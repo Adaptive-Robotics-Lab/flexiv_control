@@ -81,3 +81,17 @@ def test_joint_trajectory_rejects_unknown_interpolation():
             waypoints=[JointWaypoint(np.zeros(7), duration=0.1)],
             interpolation="cubic",
         )
+
+
+def test_joint_trajectory_preserves_legacy_positional_field_order():
+    traj = JointTrajectory(
+        [JointWaypoint(np.zeros(7), duration=0.1)],
+        0.2,
+        "linear",
+        "tabletop_safe",
+    )
+    assert traj.max_joint_speed_scale == pytest.approx(0.2)
+    assert traj.interpolation == "linear"
+    assert traj.safety_profile == "tabletop_safe"
+    assert traj.initial_positions is None
+    assert traj.strict_timing is False

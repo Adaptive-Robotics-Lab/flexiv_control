@@ -99,6 +99,57 @@ with RemoteRobot("ROBOT_HOST_IP", 8766, owner="mpc") as r:
 `RemoteRobot` mirrors the `Robot` API over newline-JSON/TCP, holds the lease with
 a heartbeat, and installs with only numpy.
 
+## Strict receding-horizon joint prefixes
+
+Use one atomic `execute_joint_trajectory` call for a multi-segment actuator
+prefix. Knot 0 is the previous commanded target, not a fresh measured-state
+sample; normal physical tracking lag therefore does not bend the next spline.
+
+```python
+import numpy as np
+from flexiv_control import JointGripperTarget, JointTrajectory, JointWaypoint
+
+knot0 = np.asarray(previous_ack_target, float)  # [q0..q6, gripper_width]
+knots = np.asarray(prefix_targets, float)       # shape (N, 8)
+frames = [32, 1]
+
+traj = JointTrajectory(
+    initial_positions=knot0[:7],
+    initial_gripper_width=float(knot0[7]),
+    waypoints=[
+        JointWaypoint(
+            positions=knot[:7],
+            gripper=JointGripperTarget(
+                width=float(knot[7]),
+                force=20.0,
+                velocity=None,  # derive abs(delta_width) / segment duration
+            ),
+            n_frames=n_frames,
+        )
+        for knot, n_frames in zip(knots, frames)
+    ],
+    interpolation="linear",
+    strict_timing=True,
+    max_joint_speed_scale=0.3,
+)
+result = robot.execute_joint_trajectory(traj)
+```
+
+Every strict segment is prevalidated against the effective runtime joint rates
+and cached `Gripper.params` before any backend write. Requested `n_frames` are
+authoritative: a violation raises instead of clipping or time-stretching. A
+provided gripper velocity must equal the velocity that realizes its width delta
+in the same segment; `None` derives it. Position-mode `Gripper.Move` is issued
+fire-and-forget at the segment boundary, then the arm streams concurrently.
+
+On the first explicit call, knot 0 must be within one safe controller tick of
+measured state. After a successful response, the next call's knot 0 must match
+`result.log["acknowledged_ending_joint_target"]` (and the acknowledged gripper
+target) exactly within protocol tolerance. Stop, fault, lease changes, mode
+changes, and any other mutating motion/gripper RPC clear that continuity cache.
+The result log also includes requested/scheduled segment and total ticks,
+initial/ending targets, gripper events, and measured gripper tracking.
+
 ## Safety notes for MPC
 
 - Keep the safety filter on (it is, by default). A misbehaving solver that

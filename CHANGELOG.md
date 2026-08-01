@@ -6,6 +6,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-31
+
+### Added
+- Joint trajectories can carry an explicit actuator-target knot 0, exact
+  per-waypoint gripper targets, and strict authoritative `n_frames` timing.
+- The server chains explicit trajectories against the last acknowledged joint
+  and gripper targets, while retaining measured-state legacy execution for
+  non-strict callers.
+
+### Changed
+- The joint trajectory wire schema and trajectory RPC identity are v3 and
+  refuse older or structurally loose payloads before motion.
+- Strict joint trajectories are fully prevalidated against effective runtime
+  joint and `Gripper.params` limits; violations reject instead of clipping or
+  time-stretching. `Gripper.Move` dispatches fire-and-forget at each segment
+  boundary while arm streaming continues in the same RPC.
+
 ## [0.2.2] - 2026-07-31
 
 ### Changed

@@ -35,6 +35,7 @@ from ..trajectory import (
     CartesianWaypoint,
     TrajectoryRepresentation,
     ExecutionResult,
+    JointGripperTarget,
     JointTrajectory,
     JointWaypoint,
 )
@@ -49,8 +50,9 @@ from ..types import (
 )
 
 DEFAULT_PORT = 8766
-SERVER_INFO_SCHEMA = "flexiv-control.server-info.v2"
-PROTOCOL_ID = "flexiv-control.trajectory-rpc.v2"
+SERVER_INFO_SCHEMA = "flexiv-control.server-info.v3"
+PROTOCOL_ID = "flexiv-control.trajectory-rpc.v3"
+JOINT_TRAJECTORY_SCHEMA = "flexiv-control.joint-trajectory.v3"
 
 # Canonical, path-independent description of the wire seam that must agree
 # across the planner client and robot-side server.  In particular, this pins
@@ -78,9 +80,26 @@ PROTOCOL_CONTRACT = {
         "execute_joint_trajectory": "traj",
     },
     "joint_trajectory_contract": {
+        "schema": JOINT_TRAJECTORY_SCHEMA,
+        "trajectory_fields": [
+            "schema",
+            "waypoints",
+            "initial_positions",
+            "initial_gripper_width",
+            "max_joint_speed_scale",
+            "interpolation",
+            "strict_timing",
+            "safety_profile",
+        ],
+        "waypoint_fields": ["positions", "n_frames", "duration", "gripper"],
+        "gripper_target_fields": ["width", "force", "velocity"],
+        "rpc_identity_fields": ["protocol_id", "protocol_fingerprint_sha256"],
+        "explicit_initial_target": ["initial_positions", "initial_gripper_width"],
+        "strict_timing": "authoritative-n_frames-reject-no-clip-or-time-stretch",
+        "continuity": "server-last-ack-target-or-first-call-one-tick-measured-bound",
+        "gripper": "exact-Move-target-concurrent-at-segment-boundary",
         "interpolation": ["cosine", "linear"],
         "max_joint_speed_scale": "finite-(0,1]-active-profile-ceiling",
-        "missing_interpolation": "cosine",
     },
 }
 
@@ -99,11 +118,7 @@ def _source_fingerprint_sha256() -> str:
     package_root = Path(__file__).resolve().parents[1]
     digest = hashlib.sha256()
     for path in sorted(package_root.rglob("*")):
-        if (
-            not path.is_file()
-            or "__pycache__" in path.parts
-            or path.suffix in {".pyc", ".pyo"}
-        ):
+        if not path.is_file() or "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
             continue
         relative = path.relative_to(package_root).as_posix()
         digest.update(relative.encode("utf-8"))
@@ -122,18 +137,13 @@ def server_info(**runtime: Any) -> dict[str, Any]:
     required = {"control_hz", "active_safety_profile"}
     missing = sorted(required.difference(runtime))
     if missing:
-        raise ValueError(
-            "server_info missing required runtime fields: "
-            + ", ".join(missing)
-        )
+        raise ValueError("server_info missing required runtime fields: " + ", ".join(missing))
     control_hz = float(runtime["control_hz"])
     if not np.isfinite(control_hz) or control_hz <= 0.0:
         raise ValueError("server_info control_hz must be finite and > 0")
     active_profile = str(runtime["active_safety_profile"]).strip()
     if not active_profile:
-        raise ValueError(
-            "server_info active_safety_profile must be non-empty"
-        )
+        raise ValueError("server_info active_safety_profile must be non-empty")
     info: dict[str, Any] = {
         "schema": SERVER_INFO_SCHEMA,
         "package": "flexiv-control",
@@ -387,34 +397,110 @@ def trajectory_from_dict(d: dict) -> CartesianTrajectory:
 # ---------------------------------------------------------------------------
 # JointTrajectory
 # ---------------------------------------------------------------------------
+def _require_exact_keys(value: dict, expected: set[str], *, context: str) -> None:
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be an object")
+    actual = set(value)
+    if actual != expected:
+        raise ValueError(
+            f"{context} keys do not match {JOINT_TRAJECTORY_SCHEMA}: "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+
+
+def joint_gripper_target_to_dict(g: Optional[JointGripperTarget]) -> Optional[dict]:
+    if g is None:
+        return None
+    return {"width": g.width, "force": g.force, "velocity": g.velocity}
+
+
+def joint_gripper_target_from_dict(d: Optional[dict]) -> Optional[JointGripperTarget]:
+    if d is None:
+        return None
+    _require_exact_keys(d, {"width", "force", "velocity"}, context="JointGripperTarget")
+    return JointGripperTarget(
+        width=float(d["width"]),
+        force=float(d["force"]),
+        velocity=None if d["velocity"] is None else float(d["velocity"]),
+    )
+
+
 def joint_trajectory_to_dict(c: JointTrajectory) -> dict:
     return {
+        "schema": JOINT_TRAJECTORY_SCHEMA,
         "waypoints": [
             {
                 "positions": w.positions.tolist(),
                 "n_frames": w.n_frames,
                 "duration": w.duration,
+                "gripper": joint_gripper_target_to_dict(w.gripper),
             }
             for w in c.waypoints
         ],
+        "initial_positions": (
+            None if c.initial_positions is None else c.initial_positions.tolist()
+        ),
+        "initial_gripper_width": c.initial_gripper_width,
         "max_joint_speed_scale": c.max_joint_speed_scale,
         "interpolation": c.interpolation,
+        "strict_timing": c.strict_timing,
         "safety_profile": c.safety_profile,
     }
 
 
 def joint_trajectory_from_dict(d: dict) -> JointTrajectory:
-    wpts = [
-        JointWaypoint(
-            positions=np.asarray(w["positions"], float),
-            n_frames=w.get("n_frames"),
-            duration=w.get("duration"),
+    _require_exact_keys(
+        d,
+        {
+            "schema",
+            "waypoints",
+            "initial_positions",
+            "initial_gripper_width",
+            "max_joint_speed_scale",
+            "interpolation",
+            "strict_timing",
+            "safety_profile",
+        },
+        context="JointTrajectory",
+    )
+    if d["schema"] != JOINT_TRAJECTORY_SCHEMA:
+        raise ValueError(
+            f"unsupported JointTrajectory schema {d['schema']!r}; "
+            f"expected {JOINT_TRAJECTORY_SCHEMA!r}"
         )
-        for w in d["waypoints"]
-    ]
+    if not isinstance(d["waypoints"], list):
+        raise ValueError("JointTrajectory.waypoints must be a list")
+    if not isinstance(d["strict_timing"], bool):
+        raise ValueError("JointTrajectory.strict_timing must be a boolean")
+    if not isinstance(d["interpolation"], str):
+        raise ValueError("JointTrajectory.interpolation must be a string")
+    if not isinstance(d["safety_profile"], str):
+        raise ValueError("JointTrajectory.safety_profile must be a string")
+    wpts = []
+    for index, w in enumerate(d["waypoints"]):
+        _require_exact_keys(
+            w,
+            {"positions", "n_frames", "duration", "gripper"},
+            context=f"JointWaypoint[{index}]",
+        )
+        wpts.append(
+            JointWaypoint(
+                positions=np.asarray(w["positions"], float),
+                n_frames=w["n_frames"],
+                duration=w["duration"],
+                gripper=joint_gripper_target_from_dict(w["gripper"]),
+            )
+        )
     return JointTrajectory(
         waypoints=wpts,
-        max_joint_speed_scale=float(d.get("max_joint_speed_scale", 0.3)),
-        interpolation=d.get("interpolation", "cosine"),
-        safety_profile=d.get("safety_profile", ""),
+        initial_positions=(
+            None if d["initial_positions"] is None else np.asarray(d["initial_positions"], float)
+        ),
+        initial_gripper_width=(
+            None if d["initial_gripper_width"] is None else float(d["initial_gripper_width"])
+        ),
+        max_joint_speed_scale=float(d["max_joint_speed_scale"]),
+        interpolation=d["interpolation"],
+        strict_timing=d["strict_timing"],
+        safety_profile=d["safety_profile"],
     )

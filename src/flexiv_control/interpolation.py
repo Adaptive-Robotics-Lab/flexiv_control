@@ -117,7 +117,7 @@ class JointTrajectoryInterpolator:
         self.traj = traj
         self.hz = float(control_hz)
         self.dt = 1.0 / self.hz
-        self.start_q = np.asarray(start_q, float)
+        self.start_q = np.asarray(start_q, float).reshape(-1).copy()
         self.max_joint_speed: Optional[np.ndarray]
         if max_joint_speed is None:
             self.max_joint_speed = None
@@ -132,80 +132,79 @@ class JointTrajectoryInterpolator:
                     "max_joint_speed must be scalar or match start_q shape "
                     f"{self.start_q.shape}, got {speed.shape}"
                 )
-            if (
-                not np.all(np.isfinite(speed))
-                or np.any(speed <= 0.0)
-            ):
-                raise ValueError(
-                    "max_joint_speed values must be finite and > 0"
-                )
+            if not np.all(np.isfinite(speed)) or np.any(speed <= 0.0):
+                raise ValueError("max_joint_speed values must be finite and > 0")
             self.max_joint_speed = speed
-        # Allocate integer controller ticks from cumulative time boundaries.
-        # Rounding each segment independently can shorten a prefix (for
-        # example, 2 x 16.32 ticks became 16 + 16 instead of 33 total).
+
         cumulative_requested_ticks = 0.0
         cumulative_scheduled_ticks = 0
         self.requested_duration_s = 0.0
-        self.nominal_segment_ticks: list[int] = []
+        self.requested_segment_ticks: list[int] = []
         for wp in self.traj.waypoints:
             duration_s = float(wp.resolve_duration(self.hz))
             if not np.isfinite(duration_s) or duration_s <= 0.0:
-                raise ValueError(
-                    "JointWaypoint duration must be finite and > 0"
-                )
+                raise ValueError("JointWaypoint duration must be finite and > 0")
             self.requested_duration_s += duration_s
             cumulative_requested_ticks += duration_s * self.hz
             boundary = max(
                 cumulative_scheduled_ticks + 1,
                 int(np.floor(cumulative_requested_ticks + 0.5)),
             )
-            self.nominal_segment_ticks.append(
-                boundary - cumulative_scheduled_ticks
-            )
+            self.requested_segment_ticks.append(boundary - cumulative_scheduled_ticks)
             cumulative_scheduled_ticks = boundary
-        self.nominal_total_ticks = cumulative_scheduled_ticks
+        self.requested_total_ticks = cumulative_scheduled_ticks
+        # Backward-compatible names used by callers/tests.
+        self.nominal_segment_ticks = list(self.requested_segment_ticks)
+        self.nominal_total_ticks = self.requested_total_ticks
+
+        peak_factor = 1.0 if traj.interpolation == "linear" else _BLEND_PEAK
         self.scheduled_segment_ticks: list[int] = []
-        self.scheduled_total_ticks = 0
+        prev = self.start_q
+        for segment_index, (wp, requested_n) in enumerate(
+            zip(self.traj.waypoints, self.requested_segment_ticks)
+        ):
+            tgt = wp.positions
+            if tgt.shape != self.start_q.shape:
+                raise ValueError(
+                    f"JointWaypoint {segment_index} positions must match "
+                    f"start_q shape {self.start_q.shape}, got {tgt.shape}"
+                )
+            n = int(requested_n)
+            if self.max_joint_speed is not None:
+                dq = np.abs(tgt - prev)
+                required = peak_factor * dq / (n * self.dt)
+                too_fast = required > self.max_joint_speed + 1e-12
+                if traj.strict_timing and np.any(too_fast):
+                    joint = int(np.flatnonzero(too_fast)[0])
+                    raise ValueError(
+                        "strict_timing joint rate exceeds effective runtime "
+                        f"limit at segment {segment_index}, joint {joint}: "
+                        f"required {required[joint]:.9g} rad/s > "
+                        f"{self.max_joint_speed[joint]:.9g} rad/s; "
+                        f"requested n_frames={n} is authoritative"
+                    )
+                if not traj.strict_timing:
+                    n = max(
+                        n,
+                        int(np.max(np.ceil(peak_factor * dq / (self.max_joint_speed * self.dt)))),
+                    )
+            self.scheduled_segment_ticks.append(max(1, n))
+            prev = tgt
+        self.scheduled_total_ticks = int(sum(self.scheduled_segment_ticks))
+        self.current_segment = 0
+        self.current_segment_tick = 0
 
     def __iter__(self) -> Iterator[np.ndarray]:
         prev = self.start_q.copy()
-        self.scheduled_segment_ticks = []
-        self.scheduled_total_ticks = 0
-        peak_factor = (
-            1.0
-            if self.traj.interpolation == "linear"
-            else _BLEND_PEAK
-        )
-        for wp, nominal_n in zip(
-            self.traj.waypoints,
-            self.nominal_segment_ticks,
+        for segment_index, (wp, n) in enumerate(
+            zip(self.traj.waypoints, self.scheduled_segment_ticks)
         ):
+            self.current_segment = segment_index
             tgt = wp.positions
-            n = int(nominal_n)
-            if self.max_joint_speed is not None:
-                dq = np.abs(tgt - prev)
-                n = max(
-                    n,
-                    int(
-                        np.max(
-                            np.ceil(
-                                peak_factor
-                                * dq
-                                / (self.max_joint_speed * self.dt)
-                            )
-                        )
-                    ),
-                )
-            n = max(1, n)
-            self.scheduled_segment_ticks.append(n)
-            self.scheduled_total_ticks += n
             for k in range(1, n + 1):
+                self.current_segment_tick = k
                 phase = k / n
-                s = (
-                    phase
-                    if self.traj.interpolation == "linear"
-                    else _cosine_blend(phase)
-                )
+                s = phase if self.traj.interpolation == "linear" else _cosine_blend(phase)
                 yield prev + s * (tgt - prev)
             prev = tgt.copy()
 
