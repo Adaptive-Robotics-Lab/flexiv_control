@@ -1,7 +1,14 @@
 import numpy as np
 import pytest
 
-from flexiv_control import CartesianTrajectory, CartesianDelta, CartesianWaypoint, ExecutionResult
+from flexiv_control import (
+    CartesianDelta,
+    CartesianTrajectory,
+    CartesianWaypoint,
+    ExecutionResult,
+    JointTrajectory,
+    JointWaypoint,
+)
 
 
 def test_waypoint_requires_duration_or_frames():
@@ -57,3 +64,20 @@ def test_cartesian_delta_shape():
 def test_execution_result_defaults():
     r = ExecutionResult()
     assert r.success and not r.clipped and r.stop_reason == "none"
+
+
+@pytest.mark.parametrize("scale", [0.0, -0.1, 1.1, np.nan, np.inf])
+def test_joint_trajectory_rejects_invalid_speed_scale(scale):
+    with pytest.raises(ValueError, match="max_joint_speed_scale"):
+        JointTrajectory(
+            waypoints=[JointWaypoint(np.zeros(7), duration=0.1)],
+            max_joint_speed_scale=scale,
+        )
+
+
+def test_joint_trajectory_rejects_unknown_interpolation():
+    with pytest.raises(ValueError, match="interpolation"):
+        JointTrajectory(
+            waypoints=[JointWaypoint(np.zeros(7), duration=0.1)],
+            interpolation="cubic",
+        )

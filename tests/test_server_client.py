@@ -1,10 +1,17 @@
+from importlib.metadata import version as distribution_version
 import re
 import time
 
 import numpy as np
 import pytest
 
-from flexiv_control import CartesianTrajectory, RobotConfig, __version__
+from flexiv_control import (
+    CartesianTrajectory,
+    JointTrajectory,
+    JointWaypoint,
+    RobotConfig,
+    __version__,
+)
 from flexiv_control.client import RemoteRobot, RemoteRobotError
 from flexiv_control.server import FlexivControlServer
 from flexiv_control.server import protocol as P
@@ -51,24 +58,59 @@ def test_server_info_is_read_only_and_pins_trajectory_protocol(
         assert robot._has_lease is False
         first = robot.get_server_info()
         second = robot.get_server_info()
-        assert first == second == P.server_info()
+        assert first == second == P.server_info(
+            **srv.robot.server_runtime_info()
+        )
         assert srv.lease.owner == ""
         assert robot._has_lease is False
     finally:
         robot.close()
 
-    assert first["schema"] == "flexiv-control.server-info.v1"
+    assert first["schema"] == "flexiv-control.server-info.v2"
     assert first["package"] == "flexiv-control"
     assert first["package_version"] == __version__
-    assert first["protocol_id"] == "flexiv-control.trajectory-rpc.v1"
+    assert first["protocol_id"] == "flexiv-control.trajectory-rpc.v2"
     assert first["protocol_fingerprint_sha256"] == P.PROTOCOL_FINGERPRINT_SHA256
     assert first["source_fingerprint_sha256"] == P.SOURCE_FINGERPRINT_SHA256
+    assert first["control_hz"] == pytest.approx(200.0)
+    assert first["active_safety_profile"] == srv.robot.profile.name
     assert re.fullmatch(r"[0-9a-f]{64}", first["protocol_fingerprint_sha256"])
     assert re.fullmatch(r"[0-9a-f]{64}", first["source_fingerprint_sha256"])
     assert P.PROTOCOL_CONTRACT["trajectory_rpcs"] == {
         "execute_cartesian_trajectory": "traj",
         "execute_joint_trajectory": "traj",
     }
+    assert P.PROTOCOL_CONTRACT["identity_rpc"]["runtime_fields"] == {
+        "required": ["control_hz", "active_safety_profile"],
+        "hardware_when_available": [
+            "runtime_hardware_identity",
+            "gripper_limits",
+            "joint_limits",
+            "current_safety_limits",
+            "effective_joint_limits",
+        ],
+    }
+    assert P.PROTOCOL_CONTRACT["joint_trajectory_contract"] == {
+        "interpolation": ["cosine", "linear"],
+        "max_joint_speed_scale": "finite-(0,1]-active-profile-ceiling",
+        "missing_interpolation": "cosine",
+    }
+
+
+def test_distribution_metadata_matches_runtime_version():
+    assert distribution_version("flexiv-control") == __version__
+
+
+def test_server_info_rejects_missing_or_invalid_runtime_fields():
+    with pytest.raises(ValueError, match="missing required runtime"):
+        P.server_info()
+    with pytest.raises(ValueError, match="control_hz"):
+        P.server_info(
+            control_hz=0.0,
+            active_safety_profile="tabletop_safe",
+        )
+    with pytest.raises(ValueError, match="active_safety_profile"):
+        P.server_info(control_hz=100.0, active_safety_profile="")
 
 
 def test_remote_servo_delta(server):
@@ -79,6 +121,55 @@ def test_remote_servo_delta(server):
         robot.servo_cartesian_delta([0.0, 0.01, 0.0, 0, 0, 0], duration=0.05)
         after = robot.get_state().tcp_position
         assert after[1] > before[1]
+
+
+def test_joint_trajectory_contract_is_enforced_before_streaming(server):
+    srv, port = server
+    with RemoteRobot("127.0.0.1", port, owner="joint-contract") as robot:
+        q0 = robot.get_state().q.copy()
+        with pytest.raises(RemoteRobotError, match="exceeds active"):
+            robot.execute_joint_trajectory(
+                JointTrajectory(
+                    waypoints=[
+                        JointWaypoint(positions=q0, duration=0.02)
+                    ],
+                    max_joint_speed_scale=0.31,
+                    interpolation="linear",
+                )
+            )
+        assert np.array_equal(robot.get_state().q, q0)
+
+        result = robot.execute_joint_trajectory(
+            JointTrajectory(
+                waypoints=[
+                    JointWaypoint(positions=q0, duration=0.016),
+                    JointWaypoint(positions=q0, duration=0.016),
+                ],
+                max_joint_speed_scale=0.29,
+                interpolation="linear",
+            )
+        )
+        assert result.success
+        assert result.log["joint_interpolation"] == "linear"
+        assert result.log["effective_max_joint_speed_scale"] == pytest.approx(
+            0.29
+        )
+        # 2 x 3.2 requested ticks at the 200 Hz fixture -> 3 + 3 = 6.
+        assert result.log["scheduled_segment_ticks"] == [3, 3]
+        assert result.log["scheduled_total_ticks"] == 6
+
+
+def test_joint_interpolation_round_trips_and_legacy_payload_defaults_cosine():
+    traj = JointTrajectory(
+        waypoints=[JointWaypoint(np.zeros(7), duration=0.1)],
+        interpolation="linear",
+    )
+    payload = P.joint_trajectory_to_dict(traj)
+    assert payload["interpolation"] == "linear"
+    assert P.joint_trajectory_from_dict(payload).interpolation == "linear"
+
+    del payload["interpolation"]
+    assert P.joint_trajectory_from_dict(payload).interpolation == "cosine"
 
 
 def test_lease_blocks_second_client(server):

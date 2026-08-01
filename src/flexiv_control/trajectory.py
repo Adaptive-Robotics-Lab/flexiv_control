@@ -446,6 +446,12 @@ class JointWaypoint:
 class JointTrajectory:
     waypoints: List[JointWaypoint]
     max_joint_speed_scale: float = 0.3   # fraction of joint vel limits
+    # Joint-space sampling MPC commonly optimizes a piecewise-linear control
+    # signal. Keep the legacy cosine easing as the default for compatibility,
+    # but make the interpolation law explicit on the wire so a planner can
+    # require exact linear execution rather than silently getting a different
+    # path between the same endpoints.
+    interpolation: str = "cosine"       # "cosine" | "linear"
     # Same semantics as CartesianTrajectory.safety_profile: "" = use the active
     # profile; a non-empty name must match the active profile or execution raises.
     safety_profile: str = ""
@@ -453,6 +459,16 @@ class JointTrajectory:
     def __post_init__(self) -> None:
         if not self.waypoints:
             raise ValueError("JointTrajectory needs at least one waypoint")
+        self.max_joint_speed_scale = float(self.max_joint_speed_scale)
+        if (
+            not np.isfinite(self.max_joint_speed_scale)
+            or not 0.0 < self.max_joint_speed_scale <= 1.0
+        ):
+            raise ValueError("max_joint_speed_scale must be finite and in (0, 1]")
+        if self.interpolation not in {"cosine", "linear"}:
+            raise ValueError(
+                "JointTrajectory.interpolation must be 'cosine' or 'linear'"
+            )
 
 
 # ----------------------------------------------------------------------------

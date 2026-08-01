@@ -48,6 +48,33 @@ def test_joint_clip_to_limits():
     assert np.all(res.q <= p.joint_upper - p.joint_margin_rad + 1e-9)
 
 
+def test_joint_speed_filter_uses_per_joint_runtime_limits():
+    p = SafetyProfile(max_joint_speed_scale=0.5)
+    limits = np.array([2.0, 0.2, 2, 2, 2, 2, 2], float)
+    f = SafetyFilter(
+        p,
+        control_dt=0.01,
+        joint_velocity_max=limits,
+    )
+    s = RobotState()
+    s.q = np.zeros(7)
+    res = f.filter_joint(np.full(7, 0.1), s)
+    expected = limits * 0.5 * 0.01
+    assert np.allclose(res.q, expected)
+
+
+def test_joint_speed_filter_rejects_invalid_runtime_limits():
+    with np.testing.assert_raises_regex(
+        ValueError,
+        "joint_velocity_max",
+    ):
+        SafetyFilter(
+            SafetyProfile(),
+            control_dt=0.01,
+            joint_velocity_max=np.ones(6),
+        )
+
+
 def test_command_age_watchdog():
     p = SafetyProfile(command_timeout_ms=100)
     f = SafetyFilter(p, control_dt=0.01)

@@ -18,6 +18,8 @@ Design notes
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
 from typing import Optional
@@ -91,6 +93,13 @@ class Robot:
             safety_profile or self.cfg.default_safety_profile
         )
         self.filter = SafetyFilter(self.profile, self.dt)
+        self._joint_velocity_limits = np.full(
+            self.cfg.n_joints,
+            2.0,
+            dtype=float,
+        )
+        self._effective_joint_contract: Optional[dict] = None
+        self._apply_runtime_joint_contract()
         # Cooperative cancel: another thread (e.g. the server's stop handler)
         # sets this and the executing traj loop aborts at its next tick.
         self._cancel = threading.Event()
@@ -126,6 +135,161 @@ class Robot:
     # -- lifecycle -----------------------------------------------------------
     def connect(self) -> None:
         self.backend.connect()
+        self._apply_runtime_joint_contract()
+
+    def _apply_runtime_joint_contract(self) -> None:
+        """Intersect configured limits with cached hardware/firmware facts."""
+        backend_info = dict(self.backend.runtime_info())
+        runtime = backend_info.get("joint_limits")
+        lower = np.asarray(self.profile.joint_lower, dtype=float).reshape(-1)
+        upper = np.asarray(self.profile.joint_upper, dtype=float).reshape(-1)
+        velocity = np.full(lower.shape, 2.0, dtype=float)
+        sources = ["configured_safety_profile"]
+
+        if runtime is not None:
+            runtime_lower = np.asarray(
+                runtime["position_min_rad"],
+                dtype=float,
+            ).reshape(-1)
+            runtime_upper = np.asarray(
+                runtime["position_max_rad"],
+                dtype=float,
+            ).reshape(-1)
+            runtime_velocity = np.asarray(
+                runtime["velocity_max_rad_s"],
+                dtype=float,
+            ).reshape(-1)
+            if not (
+                runtime_lower.shape
+                == runtime_upper.shape
+                == runtime_velocity.shape
+                == lower.shape
+            ):
+                raise RuntimeError(
+                    "runtime RobotInfo joint limit dimensions do not match "
+                    "the configured safety profile"
+                )
+            lower = np.maximum(lower, runtime_lower)
+            upper = np.minimum(upper, runtime_upper)
+            velocity = runtime_velocity
+            sources.append(str(runtime.get("source", "runtime_joint_limits")))
+        elif self.cfg.backend.lower() in ("flexiv_rdk", "rdk", "flexiv"):
+            # A hardware deployment must never fall back to the old uniform
+            # 2 rad/s assumption.
+            if self.backend.is_connected:
+                raise RuntimeError(
+                    "connected Flexiv RDK backend did not provide runtime "
+                    "joint limits"
+                )
+
+        current = backend_info.get("current_safety_limits")
+        if current is not None:
+            current_lower = np.asarray(
+                current["position_min_rad"],
+                dtype=float,
+            ).reshape(-1)
+            current_upper = np.asarray(
+                current["position_max_rad"],
+                dtype=float,
+            ).reshape(-1)
+            current_normal = np.asarray(
+                current["velocity_max_normal_rad_s"],
+                dtype=float,
+            ).reshape(-1)
+            current_reduced = np.asarray(
+                current["velocity_max_reduced_rad_s"],
+                dtype=float,
+            ).reshape(-1)
+            if not (
+                current_lower.shape
+                == current_upper.shape
+                == current_normal.shape
+                == current_reduced.shape
+                == lower.shape
+            ):
+                raise RuntimeError(
+                    "runtime SafetyLimits dimensions do not match the "
+                    "configured safety profile"
+                )
+            lower = np.maximum(lower, current_lower)
+            upper = np.minimum(upper, current_upper)
+            # Which firmware state is active can change asynchronously; the
+            # smaller ceiling is safe in both normal and reduced operation.
+            velocity = np.minimum(
+                velocity,
+                np.minimum(current_normal, current_reduced),
+            )
+            sources.append(
+                str(current.get("source", "current_safety_limits"))
+            )
+
+        if (
+            not np.all(np.isfinite(lower))
+            or not np.all(np.isfinite(upper))
+            or np.any(lower >= upper)
+        ):
+            raise RuntimeError(
+                "effective joint position limit intersection is invalid"
+            )
+        if (
+            not np.all(np.isfinite(velocity))
+            or np.any(velocity <= 0.0)
+        ):
+            raise RuntimeError(
+                "effective per-joint velocity limits are invalid"
+            )
+
+        self.profile.joint_lower = lower
+        self.profile.joint_upper = upper
+        self._joint_velocity_limits = velocity
+        self.filter.set_profile(self.profile)
+        self.filter.set_joint_velocity_limits(velocity)
+        enforced_lower = lower + self.profile.joint_margin_rad
+        enforced_upper = upper - self.profile.joint_margin_rad
+        if np.any(enforced_lower >= enforced_upper):
+            raise RuntimeError(
+                "joint margin collapses the effective position interval"
+            )
+        contract = {
+            "sources": sources,
+            "hard_position_min_rad": lower.tolist(),
+            "hard_position_max_rad": upper.tolist(),
+            "enforced_position_min_rad": enforced_lower.tolist(),
+            "enforced_position_max_rad": enforced_upper.tolist(),
+            "base_velocity_max_rad_s": velocity.tolist(),
+            "max_joint_speed_scale": float(
+                self.profile.max_joint_speed_scale
+            ),
+        }
+        payload = json.dumps(
+            contract,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        contract["sha256"] = hashlib.sha256(payload).hexdigest()
+        self._effective_joint_contract = contract
+
+    def server_runtime_info(self) -> dict:
+        """Return the server's cached runtime contract without a state read."""
+        backend_info = dict(self.backend.runtime_info())
+        info = {
+            "control_hz": float(self.control_hz),
+            "active_safety_profile": self.profile.name,
+        }
+        for key in (
+            "runtime_hardware_identity",
+            "gripper_limits",
+            "joint_limits",
+            "current_safety_limits",
+        ):
+            value = backend_info.get(key)
+            if value is not None:
+                info[key] = value
+        if self._effective_joint_contract is not None:
+            info["effective_joint_limits"] = dict(
+                self._effective_joint_contract
+            )
+        return info
 
     def disconnect(self) -> None:
         self.backend.disconnect()
@@ -157,8 +321,9 @@ class Robot:
     # -- safety profile ------------------------------------------------------
     def set_safety_profile(self, name_or_path: str) -> None:
         self.profile = load_safety_profile(name_or_path)
-        # Update in place so a running control loop / server keeps its reference.
-        self.filter.set_profile(self.profile)
+        # Recompute the intersection; changing a profile can tighten but never
+        # expand beyond connected hardware/firmware facts.
+        self._apply_runtime_joint_contract()
 
     # -- state ---------------------------------------------------------------
     def get_state(self) -> RobotState:
@@ -609,6 +774,21 @@ class Robot:
                 raise TrajectoryStoppedError(result)
             return result
         self._verify_trajectory_profile(traj.safety_profile, result)
+        requested_speed_scale = float(traj.max_joint_speed_scale)
+        active_speed_scale = float(self.profile.max_joint_speed_scale)
+        result.log["requested_max_joint_speed_scale"] = requested_speed_scale
+        result.log["active_max_joint_speed_scale"] = active_speed_scale
+        if requested_speed_scale > active_speed_scale + 1e-12:
+            raise ValueError(
+                "JointTrajectory max_joint_speed_scale "
+                f"{requested_speed_scale:.9g} exceeds active safety-profile "
+                f"ceiling {active_speed_scale:.9g}"
+            )
+        # A lower per-trajectory maximum is safe and must be honoured. The
+        # active profile remains the independent server-side ceiling.
+        effective_speed_scale = requested_speed_scale
+        result.log["effective_max_joint_speed_scale"] = effective_speed_scale
+        result.log["joint_interpolation"] = traj.interpolation
         start = self.get_state()
         if start.control_mode.is_cartesian or start.control_mode == ControlMode.IDLE:
             self.start_joint_impedance()
@@ -619,9 +799,23 @@ class Robot:
             traj,
             start.q,
             self.control_hz,
-            max_joint_speed=2.0 * self.profile.max_joint_speed_scale,
+            max_joint_speed=(
+                self._joint_velocity_limits * effective_speed_scale
+            ),
         )
+        result.log["base_joint_velocity_limits_rad_s"] = (
+            self._joint_velocity_limits.tolist()
+        )
+        if self._effective_joint_contract is not None:
+            result.log["effective_joint_limits_sha256"] = (
+                self._effective_joint_contract["sha256"]
+            )
+        result.log["requested_duration_s"] = interp.requested_duration_s
+        result.log["nominal_scheduled_ticks"] = interp.nominal_total_ticks
+        result.log["control_hz"] = float(self.control_hz)
         t_loop = time.perf_counter()
+        execution_started = t_loop
+        streamed_ticks = 0
         for q in interp:
             if self._cancel.is_set():
                 self._cancel.clear()
@@ -652,10 +846,22 @@ class Robot:
             if sr.clipped:
                 result.clipped = True
             self.backend.stream_joint(sr.q)
+            streamed_ticks += 1
             t_loop += self.dt
             sleep = t_loop - time.perf_counter()
             if sleep > 0:
                 time.sleep(sleep)
+        result.executed_duration = time.perf_counter() - execution_started
+        result.log["scheduled_segment_ticks"] = list(
+            interp.scheduled_segment_ticks
+        )
+        result.log["scheduled_total_ticks"] = int(
+            interp.scheduled_total_ticks
+        )
+        result.log["scheduled_duration_s"] = float(
+            interp.scheduled_total_ticks * self.dt
+        )
+        result.log["streamed_ticks"] = int(streamed_ticks)
         result.final_state = self.get_state()
         if raise_on_stop and not result.success:
             raise TrajectoryStoppedError(result)

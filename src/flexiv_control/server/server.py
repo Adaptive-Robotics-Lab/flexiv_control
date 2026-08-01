@@ -232,8 +232,8 @@ class FlexivControlServer:
 
     # -- handlers ------------------------------------------------------------
     def _h_get_server_info(self, p: dict) -> dict:
-        """Return software/protocol identity without a lease or robot access."""
-        return P.server_info()
+        """Return identity plus connect-time facts, without a lease/state read."""
+        return P.server_info(**self.robot.server_runtime_info())
 
     def _h_acquire_lease(self, p: dict) -> dict:
         force = bool(p.get("force", False))

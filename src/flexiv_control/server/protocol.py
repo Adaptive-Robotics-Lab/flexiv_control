@@ -49,8 +49,8 @@ from ..types import (
 )
 
 DEFAULT_PORT = 8766
-SERVER_INFO_SCHEMA = "flexiv-control.server-info.v1"
-PROTOCOL_ID = "flexiv-control.trajectory-rpc.v1"
+SERVER_INFO_SCHEMA = "flexiv-control.server-info.v2"
+PROTOCOL_ID = "flexiv-control.trajectory-rpc.v2"
 
 # Canonical, path-independent description of the wire seam that must agree
 # across the planner client and robot-side server.  In particular, this pins
@@ -62,10 +62,25 @@ PROTOCOL_CONTRACT = {
     "identity_rpc": {
         "method": "get_server_info",
         "lease_required": False,
+        "runtime_fields": {
+            "required": ["control_hz", "active_safety_profile"],
+            "hardware_when_available": [
+                "runtime_hardware_identity",
+                "gripper_limits",
+                "joint_limits",
+                "current_safety_limits",
+                "effective_joint_limits",
+            ],
+        },
     },
     "trajectory_rpcs": {
         "execute_cartesian_trajectory": "traj",
         "execute_joint_trajectory": "traj",
+    },
+    "joint_trajectory_contract": {
+        "interpolation": ["cosine", "linear"],
+        "max_joint_speed_scale": "finite-(0,1]-active-profile-ceiling",
+        "missing_interpolation": "cosine",
     },
 }
 
@@ -102,16 +117,43 @@ PROTOCOL_FINGERPRINT_SHA256 = _canonical_sha256(PROTOCOL_CONTRACT)
 SOURCE_FINGERPRINT_SHA256 = _source_fingerprint_sha256()
 
 
-def server_info() -> dict[str, str]:
-    """Return immutable process identity; no lease or backend access required."""
-    return {
+def server_info(**runtime: Any) -> dict[str, Any]:
+    """Return process identity plus cached, lease-free runtime facts."""
+    required = {"control_hz", "active_safety_profile"}
+    missing = sorted(required.difference(runtime))
+    if missing:
+        raise ValueError(
+            "server_info missing required runtime fields: "
+            + ", ".join(missing)
+        )
+    control_hz = float(runtime["control_hz"])
+    if not np.isfinite(control_hz) or control_hz <= 0.0:
+        raise ValueError("server_info control_hz must be finite and > 0")
+    active_profile = str(runtime["active_safety_profile"]).strip()
+    if not active_profile:
+        raise ValueError(
+            "server_info active_safety_profile must be non-empty"
+        )
+    info: dict[str, Any] = {
         "schema": SERVER_INFO_SCHEMA,
         "package": "flexiv-control",
         "package_version": __version__,
         "protocol_id": PROTOCOL_ID,
         "protocol_fingerprint_sha256": PROTOCOL_FINGERPRINT_SHA256,
         "source_fingerprint_sha256": SOURCE_FINGERPRINT_SHA256,
+        "control_hz": control_hz,
+        "active_safety_profile": active_profile,
     }
+    for key in (
+        "runtime_hardware_identity",
+        "gripper_limits",
+        "joint_limits",
+        "current_safety_limits",
+        "effective_joint_limits",
+    ):
+        if key in runtime:
+            info[key] = runtime[key]
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +398,7 @@ def joint_trajectory_to_dict(c: JointTrajectory) -> dict:
             for w in c.waypoints
         ],
         "max_joint_speed_scale": c.max_joint_speed_scale,
+        "interpolation": c.interpolation,
         "safety_profile": c.safety_profile,
     }
 
@@ -372,5 +415,6 @@ def joint_trajectory_from_dict(d: dict) -> JointTrajectory:
     return JointTrajectory(
         waypoints=wpts,
         max_joint_speed_scale=float(d.get("max_joint_speed_scale", 0.3)),
+        interpolation=d.get("interpolation", "cosine"),
         safety_profile=d.get("safety_profile", ""),
     )

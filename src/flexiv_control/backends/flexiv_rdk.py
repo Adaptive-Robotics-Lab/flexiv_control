@@ -19,6 +19,7 @@ IMPORTANT, please read before running on hardware
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Optional
 
@@ -83,6 +84,49 @@ def _get(obj: Any, *names: str, default=None):
     return default
 
 
+def _required_attr(obj: Any, *names: str, context: str) -> Any:
+    """Read a required cross-version RDK field without a synthetic default."""
+    sentinel = object()
+    value = _get(obj, *names, default=sentinel)
+    if value is sentinel:
+        raise RuntimeError(
+            f"Flexiv RDK {context} is missing required field "
+            f"{'/'.join(names)}"
+        )
+    return value
+
+
+def _required_vector(
+    obj: Any,
+    *names: str,
+    size: int,
+    context: str,
+) -> np.ndarray:
+    value = np.asarray(
+        _required_attr(obj, *names, context=context),
+        dtype=float,
+    ).reshape(-1)
+    if value.shape != (size,):
+        raise RuntimeError(
+            f"Flexiv RDK {context}.{names[0]} has shape {value.shape}, "
+            f"expected ({size},)"
+        )
+    if not np.all(np.isfinite(value)):
+        raise RuntimeError(
+            f"Flexiv RDK {context}.{names[0]} contains non-finite values"
+        )
+    return value
+
+
+def _required_float(obj: Any, name: str, *, context: str) -> float:
+    value = float(_required_attr(obj, name, context=context))
+    if not np.isfinite(value):
+        raise RuntimeError(
+            f"Flexiv RDK {context}.{name} is not finite"
+        )
+    return value
+
+
 def _rdk_coord(frame: str):
     """Map a frame name to ``flexivrdk.CoordType``.
 
@@ -142,6 +186,8 @@ class FlexivRdkBackend(RobotBackend):
         self._gripper = None
         self._mode = ControlMode.IDLE
         self._connected = False
+        self._runtime_info: dict = {}
+        self._gripper_limits: Optional[dict[str, float | str]] = None
         # The active Cartesian force-control params, kept so stream_cartesian can
         # actually command the configured target_wrench (not just a zero default).
         self._force_control: Optional[ForceControlParams] = None
@@ -185,6 +231,138 @@ class FlexivRdkBackend(RobotBackend):
         except Exception:
             pass
 
+        # Cache immutable hardware facts from the already-connected RDK owner.
+        # get_server_info serves only this snapshot; it never opens a second
+        # robot connection or performs a state read.
+        robot_info = self._robot.info()
+        actual_serial = str(
+            _required_attr(
+                robot_info,
+                "serial_num",
+                context="RobotInfo",
+            )
+        ).strip()
+        if not actual_serial:
+            raise RuntimeError("Flexiv RDK RobotInfo.serial_num is empty")
+        if self.robot_sn and actual_serial != self.robot_sn:
+            raise RuntimeError(
+                f"configured robot_sn={self.robot_sn!r}, but RDK reports "
+                f"serial_num={actual_serial!r}"
+            )
+        dof = int(
+            _required_attr(robot_info, "DoF", context="RobotInfo")
+        )
+        if dof != self.n_joints:
+            raise RuntimeError(
+                f"RDK RobotInfo.DoF={dof} disagrees with n_joints="
+                f"{self.n_joints}"
+            )
+        robot_q_min = _required_vector(
+            robot_info,
+            "q_min",
+            size=dof,
+            context="RobotInfo",
+        )
+        robot_q_max = _required_vector(
+            robot_info,
+            "q_max",
+            size=dof,
+            context="RobotInfo",
+        )
+        robot_dq_max = _required_vector(
+            robot_info,
+            "dq_max",
+            size=dof,
+            context="RobotInfo",
+        )
+        if np.any(robot_q_min >= robot_q_max):
+            raise RuntimeError(
+                "Flexiv RDK RobotInfo joint position limits are not ordered"
+            )
+        if np.any(robot_dq_max <= 0.0):
+            raise RuntimeError(
+                "Flexiv RDK RobotInfo joint velocity limits must be > 0"
+            )
+        tool = flexivrdk.Tool(self._robot)
+        tool_name = str(tool.name()).strip()
+        if not tool_name:
+            raise RuntimeError(
+                "Flexiv RDK current tool profile name is empty"
+            )
+        self._runtime_info = {
+            "runtime_hardware_identity": {
+                "robot_serial": actual_serial,
+                "robot_model": str(
+                    _required_attr(
+                        robot_info,
+                        "model_name",
+                        context="RobotInfo",
+                    )
+                ),
+                "robot_software_version": str(
+                    _required_attr(
+                        robot_info,
+                        "software_ver",
+                        context="RobotInfo",
+                    )
+                ),
+                "flexivrdk_version": str(
+                    getattr(flexivrdk, "__version__", "unknown")
+                ),
+                "tool_profile": tool_name,
+            },
+            "joint_limits": {
+                "source": "flexivrdk.Robot.info",
+                "position_min_rad": robot_q_min.tolist(),
+                "position_max_rad": robot_q_max.tolist(),
+                "velocity_max_rad_s": robot_dq_max.tolist(),
+            },
+        }
+
+        # Safety.current_limits() is read-only, but constructing Safety requires
+        # the configured safety password. Never hard-code or expose it. If the
+        # deployment supplies FLEXIV_RDK_SAFETY_PASSWORD, cache the actual
+        # active firmware limits; otherwise RobotInfo limits remain available.
+        safety_password = os.environ.get("FLEXIV_RDK_SAFETY_PASSWORD")
+        if safety_password:
+            safety = flexivrdk.Safety(self._robot, safety_password)
+            current = safety.current_limits()
+            current_q_min = _required_vector(
+                current,
+                "q_min",
+                size=dof,
+                context="SafetyLimits",
+            )
+            current_q_max = _required_vector(
+                current,
+                "q_max",
+                size=dof,
+                context="SafetyLimits",
+            )
+            current_dq_normal = _required_vector(
+                current,
+                "dq_max_normal",
+                size=dof,
+                context="SafetyLimits",
+            )
+            current_dq_reduced = _required_vector(
+                current,
+                "dq_max_reduced",
+                size=dof,
+                context="SafetyLimits",
+            )
+            self._runtime_info["current_safety_limits"] = {
+                "source": "flexivrdk.Safety.current_limits",
+                "position_min_rad": current_q_min.tolist(),
+                "position_max_rad": current_q_max.tolist(),
+                "velocity_max_normal_rad_s": (
+                    current_dq_normal.tolist()
+                ),
+                "velocity_max_reduced_rad_s": (
+                    current_dq_reduced.tolist()
+                ),
+            }
+
         # Force-control modes (NRT_CARTESIAN_MOTION_FORCE -- our cartesian impedance)
         # REQUIRE the 6-DoF F/T sensor to be zeroed first, else SwitchMode faults with
         # event 301004 ("FT sensor is not calibrated using primitive [ZeroFTSensor]").
@@ -214,29 +392,93 @@ class FlexivRdkBackend(RobotBackend):
             # Calling Init() WITHOUT Enable(name) first fails with
             # "[flexiv::rdk::Gripper::Init] No gripper enabled" and leaves every
             # gripper command a silent no-op -- which is exactly the trap this used
-            # to fall into (it tried Init() first and never reached Enable). Surface
-            # any failure as a warning rather than swallowing it.
+            # to fall into (it tried Init() first and never reached Enable). A
+            # configured gripper is part of the hardware contract, so fail connect.
             try:
                 if hasattr(self._gripper, "Enable"):
                     self._gripper.Enable(self._gripper_name)
                 if hasattr(self._gripper, "Init"):
                     self._gripper.Init()
+                params = self._gripper.params()
+                limits: dict[str, float | str] = {
+                    "source": "flexivrdk.Gripper.params",
+                    "device_name": str(
+                        _required_attr(
+                            params,
+                            "name",
+                            context="GripperParams",
+                        )
+                    ),
+                    "min_width_m": _required_float(
+                        params,
+                        "min_width",
+                        context="GripperParams",
+                    ),
+                    "max_width_m": _required_float(
+                        params,
+                        "max_width",
+                        context="GripperParams",
+                    ),
+                    "min_velocity_m_s": _required_float(
+                        params,
+                        "min_vel",
+                        context="GripperParams",
+                    ),
+                    "max_velocity_m_s": _required_float(
+                        params,
+                        "max_vel",
+                        context="GripperParams",
+                    ),
+                    "min_force_n": _required_float(
+                        params,
+                        "min_force",
+                        context="GripperParams",
+                    ),
+                    "max_force_n": _required_float(
+                        params,
+                        "max_force",
+                        context="GripperParams",
+                    ),
+                }
+                for lo, hi in (
+                    ("min_width_m", "max_width_m"),
+                    ("min_velocity_m_s", "max_velocity_m_s"),
+                    ("min_force_n", "max_force_n"),
+                ):
+                    if float(limits[lo]) > float(limits[hi]):
+                        raise RuntimeError(
+                            f"Flexiv RDK gripper limits {lo}/{hi} are "
+                            "not ordered"
+                        )
+                self._gripper_limits = limits
+                self._runtime_info["gripper_limits"] = dict(limits)
+                self._runtime_info[
+                    "runtime_hardware_identity"
+                ]["gripper_device"] = str(limits["device_name"])
             except Exception as e:  # pragma: no cover - hardware-only path
-                import warnings
-
-                warnings.warn(
-                    f"gripper init failed for device {self._gripper_name!r} ({e}); "
-                    f"gripper commands will be no-ops. Check the device name against "
-                    f"Flexiv Elements -> Settings -> Device.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
                 self._gripper = None
+                self._gripper_limits = None
+                raise RuntimeError(
+                    f"gripper init failed for configured device "
+                    f"{self._gripper_name!r}; refusing to start without its "
+                    "runtime state and limits"
+                ) from e
         elif self._gripper_name is not None:
             # Explicit empty name ("") = no gripper configured; skip cleanly (no
             # scary warning) rather than attempting an init that cannot succeed.
             self._gripper = None
         self._connected = True
+
+    def runtime_info(self) -> dict:
+        """Return connect-time hardware facts without touching the robot."""
+        return {
+            key: (
+                dict(value)
+                if isinstance(value, dict)
+                else value
+            )
+            for key, value in self._runtime_info.items()
+        }
 
     def disconnect(self) -> None:
         if self._robot is not None:
@@ -265,32 +507,60 @@ class FlexivRdkBackend(RobotBackend):
             except Exception:  # pragma: no cover - defensive: mode() is optional info
                 pass
         s = self._robot.states()  # VERIFY: states() returns RobotStates
-        q = np.asarray(_get(s, "q", default=np.zeros(self.n_joints)), float)
-        dq = np.asarray(_get(s, "dq", "dtheta", default=np.zeros(self.n_joints)), float)
-        tau = np.asarray(_get(s, "tau", default=np.zeros(self.n_joints)), float)
-        tcp_pose = np.asarray(_get(s, "tcp_pose", "tcpPose", default=[0, 0, 0, 1, 0, 0, 0]), float)
-        tcp_vel = np.asarray(_get(s, "tcp_vel", "tcpVel", default=np.zeros(CART_DOF)), float)
-        wrench = np.asarray(
-            _get(s, "ext_wrench_in_tcp", "ext_wrench_in_world", "extWrenchInTcp",
-                 default=np.zeros(CART_DOF)),
-            float,
+        q = _required_vector(
+            s, "q", size=self.n_joints, context="RobotStates"
+        )
+        dq = _required_vector(
+            s,
+            "dq",
+            "dtheta",
+            size=self.n_joints,
+            context="RobotStates",
+        )
+        tau = _required_vector(
+            s, "tau", size=self.n_joints, context="RobotStates"
+        )
+        tcp_pose = _required_vector(
+            s,
+            "tcp_pose",
+            "tcpPose",
+            size=7,
+            context="RobotStates",
+        )
+        tcp_vel = _required_vector(
+            s,
+            "tcp_vel",
+            "tcpVel",
+            size=CART_DOF,
+            context="RobotStates",
+        )
+        wrench = _required_vector(
+            s,
+            "ext_wrench_in_tcp",
+            "ext_wrench_in_world",
+            "extWrenchInTcp",
+            size=CART_DOF,
+            context="RobotStates",
         )
 
         gw, gf, gm = 0.0, 0.0, False
+        if self._gripper is None and self._gripper_name:
+            raise RuntimeError(
+                f"configured gripper {self._gripper_name!r} is unavailable; "
+                "refusing to fabricate gripper state"
+            )
         if self._gripper is not None:
-            try:
-                gs = self._gripper.states()  # VERIFY
-                gw = float(_get(gs, "width", default=0.0))
-                gf = float(_get(gs, "force", default=0.0))
-                # v1.x exposes motion via the Gripper.moving() METHOD, not a
-                # states() field (GripperStates has no is_moving in v1.x, so the
-                # old field read silently always returned False).
-                if hasattr(self._gripper, "moving"):
-                    gm = bool(self._gripper.moving())
-                else:
-                    gm = bool(_get(gs, "is_moving", "isMoving", default=False))
-            except Exception:
-                pass
+            gs = self._gripper.states()  # VERIFY
+            gw = _required_float(gs, "width", context="GripperStates")
+            gf = _required_float(gs, "force", context="GripperStates")
+            gm = bool(
+                _required_attr(
+                    gs,
+                    "is_moving",
+                    "isMoving",
+                    context="GripperStates",
+                )
+            )
 
         # Surface a robot-side fault through the state so the control loop (and
         # any client polling get_state) sees it -- previously hardcoded OK.
@@ -308,10 +578,12 @@ class FlexivRdkBackend(RobotBackend):
     def in_fault(self) -> bool:
         """True if the robot reports a fault / protective stop (RDK ``fault()``)."""
         fault_fn = _get(self._robot, "fault", default=None)
+        if not callable(fault_fn):
+            return True
         try:
-            return bool(fault_fn()) if callable(fault_fn) else False
+            return bool(fault_fn())
         except Exception:
-            return False
+            return True
 
     # -- mode ---------------------------------------------------------------
     def set_mode(
@@ -416,6 +688,37 @@ class FlexivRdkBackend(RobotBackend):
                     f"gripper_name: '' for a gripper-less config."
                 )
             return
+        if self._gripper_limits is None:
+            raise RuntimeError(
+                "runtime gripper limits are unavailable; refusing command"
+            )
+        checks = [("force", cmd.force, "min_force_n", "max_force_n")]
+        if not cmd.grasp:
+            checks.extend(
+                [
+                    (
+                        "width",
+                        cmd.width,
+                        "min_width_m",
+                        "max_width_m",
+                    ),
+                    (
+                        "velocity",
+                        cmd.velocity,
+                        "min_velocity_m_s",
+                        "max_velocity_m_s",
+                    ),
+                ]
+            )
+        for field, raw, lo_key, hi_key in checks:
+            value = float(raw)
+            lo = float(self._gripper_limits[lo_key])
+            hi = float(self._gripper_limits[hi_key])
+            if not np.isfinite(value) or not lo <= value <= hi:
+                raise ValueError(
+                    f"gripper {field}={value!r} outside runtime "
+                    f"[{lo}, {hi}] from flexivrdk.Gripper.params"
+                )
         if cmd.grasp:
             self._gripper.Grasp(cmd.force)  # VERIFY
         else:

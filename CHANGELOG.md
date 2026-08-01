@@ -6,6 +6,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-31
+
+### Changed
+- Bumped the trajectory RPC identity and server-info schema to v2. The
+  lease-free identity response now binds control rate, active safety profile,
+  connected hardware facts, runtime gripper limits, and the effective joint
+  limit contract.
+- Joint trajectories now carry an explicit linear/cosine interpolation law,
+  honour per-trajectory speed scaling against per-joint runtime limits, and
+  allocate controller ticks from cumulative waypoint time.
+- Flexiv RDK state and gripper-limit reads now fail closed instead of
+  fabricating zero-valued observations or accepting unchecked commands.
+
 ## [0.2.1] - 2026-07-30
 
 ### Changed
