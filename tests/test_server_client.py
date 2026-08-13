@@ -67,10 +67,10 @@ def test_server_info_is_read_only_and_pins_trajectory_protocol(server, monkeypat
     finally:
         robot.close()
 
-    assert first["schema"] == "flexiv-control.server-info.v3"
+    assert first["schema"] == "flexiv-control.server-info.v4"
     assert first["package"] == "flexiv-control"
     assert first["package_version"] == __version__
-    assert first["protocol_id"] == "flexiv-control.trajectory-rpc.v3"
+    assert first["protocol_id"] == "flexiv-control.trajectory-rpc.v4"
     assert first["protocol_fingerprint_sha256"] == P.PROTOCOL_FINGERPRINT_SHA256
     assert first["source_fingerprint_sha256"] == P.SOURCE_FINGERPRINT_SHA256
     assert first["control_hz"] == pytest.approx(200.0)
@@ -104,7 +104,10 @@ def test_server_info_is_read_only_and_pins_trajectory_protocol(server, monkeypat
             "safety_profile",
         ],
         "waypoint_fields": ["positions", "n_frames", "duration", "gripper"],
-        "gripper_target_fields": ["width", "force", "velocity"],
+        "gripper_target_variants": {
+            "move": ["mode", "width", "force_limit", "velocity"],
+            "force": ["mode", "force"],
+        },
         "rpc_identity_fields": ["protocol_id", "protocol_fingerprint_sha256"],
         "explicit_initial_target": ["initial_positions", "initial_gripper_width"],
         "strict_timing": "authoritative-n_frames-reject-no-clip-or-time-stretch",
@@ -116,7 +119,7 @@ def test_server_info_is_read_only_and_pins_trajectory_protocol(server, monkeypat
             "first-gripper-event-from-current-measured-width",
         ],
         "numeric_json_types": "numbers-and-arrays-only-no-strings-or-booleans",
-        "gripper": "exact-Move-target-concurrent-at-segment-boundary",
+        "gripper": "explicit-Move-or-signed-Grasp-concurrent-at-segment-boundary",
         "interpolation": ["cosine", "linear"],
         "max_joint_speed_scale": "finite-(0,1]-active-profile-ceiling",
     }

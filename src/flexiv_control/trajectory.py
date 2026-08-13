@@ -456,11 +456,30 @@ class JointGripperTarget:
 
 
 @dataclass
+class JointGripperForceTarget:
+    """Signed native gripper-force target synchronized with a joint segment.
+
+    The backend dispatches ``Gripper.Grasp(force)``. Positive force closes and
+    negative force opens, exactly matching Flexiv RDK. No desired width is part
+    of this action; measured width remains observable robot state.
+    """
+
+    force: float
+
+    def __post_init__(self) -> None:
+        self.force = float(self.force)
+        if not np.isfinite(self.force):
+            raise ValueError("JointGripperForceTarget.force must be finite")
+
+
+@dataclass
 class JointWaypoint:
     positions: np.ndarray
     n_frames: Optional[int] = None
     duration: Optional[float] = None
-    gripper: Optional[Union[JointGripperTarget, GripperCommand]] = None
+    gripper: Optional[
+        Union[JointGripperTarget, JointGripperForceTarget, GripperCommand]
+    ] = None
 
     def __post_init__(self) -> None:
         self.positions = np.asarray(self.positions, float).reshape(-1)
@@ -534,7 +553,7 @@ class JointTrajectory:
                         "strict_timing requires n_frames (and no duration) on every JointWaypoint"
                     )
             if (
-                any(wp.gripper is not None for wp in self.waypoints)
+                any(isinstance(wp.gripper, JointGripperTarget) for wp in self.waypoints)
                 and self.initial_gripper_width is None
             ):
                 raise ValueError("strict_timing gripper waypoints require initial_gripper_width")

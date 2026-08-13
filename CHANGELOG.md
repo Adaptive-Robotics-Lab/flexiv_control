@@ -6,6 +6,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Joint trajectories now accept `JointGripperForceTarget(force)` alongside the
+  legacy exact-width target. It dispatches signed native
+  `Gripper.Grasp(force)` at the segment boundary: positive closes, negative
+  opens, and measured width remains state rather than an action.
+
+### Changed
+- The strict trajectory RPC/schema is v4. Gripper targets are explicitly tagged
+  as `move` or `force`, preventing a force action from being decoded as a width.
+
 ## [0.2.4] - 2026-08-01
 
 ### Fixed

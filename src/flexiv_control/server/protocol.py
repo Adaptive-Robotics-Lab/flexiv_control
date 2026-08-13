@@ -35,6 +35,7 @@ from ..trajectory import (
     CartesianWaypoint,
     TrajectoryRepresentation,
     ExecutionResult,
+    JointGripperForceTarget,
     JointGripperTarget,
     JointTrajectory,
     JointWaypoint,
@@ -50,9 +51,9 @@ from ..types import (
 )
 
 DEFAULT_PORT = 8766
-SERVER_INFO_SCHEMA = "flexiv-control.server-info.v3"
-PROTOCOL_ID = "flexiv-control.trajectory-rpc.v3"
-JOINT_TRAJECTORY_SCHEMA = "flexiv-control.joint-trajectory.v3"
+SERVER_INFO_SCHEMA = "flexiv-control.server-info.v4"
+PROTOCOL_ID = "flexiv-control.trajectory-rpc.v4"
+JOINT_TRAJECTORY_SCHEMA = "flexiv-control.joint-trajectory.v4"
 
 # Canonical, path-independent description of the wire seam that must agree
 # across the planner client and robot-side server.  In particular, this pins
@@ -92,7 +93,10 @@ PROTOCOL_CONTRACT = {
             "safety_profile",
         ],
         "waypoint_fields": ["positions", "n_frames", "duration", "gripper"],
-        "gripper_target_fields": ["width", "force", "velocity"],
+        "gripper_target_variants": {
+            "move": ["mode", "width", "force_limit", "velocity"],
+            "force": ["mode", "force"],
+        },
         "rpc_identity_fields": ["protocol_id", "protocol_fingerprint_sha256"],
         "explicit_initial_target": ["initial_positions", "initial_gripper_width"],
         "strict_timing": "authoritative-n_frames-reject-no-clip-or-time-stretch",
@@ -104,7 +108,7 @@ PROTOCOL_CONTRACT = {
             "first-gripper-event-from-current-measured-width",
         ],
         "numeric_json_types": "numbers-and-arrays-only-no-strings-or-booleans",
-        "gripper": "exact-Move-target-concurrent-at-segment-boundary",
+        "gripper": "explicit-Move-or-signed-Grasp-concurrent-at-segment-boundary",
         "interpolation": ["cosine", "linear"],
         "max_joint_speed_scale": "finite-(0,1]-active-profile-ceiling",
     },
@@ -436,19 +440,48 @@ def _require_json_number_array(value: Any, *, context: str) -> list[float]:
     ]
 
 
-def joint_gripper_target_to_dict(g: Optional[JointGripperTarget]) -> Optional[dict]:
+def joint_gripper_target_to_dict(
+    g: Optional[JointGripperTarget | JointGripperForceTarget],
+) -> Optional[dict]:
     if g is None:
         return None
-    return {"width": g.width, "force": g.force, "velocity": g.velocity}
+    if isinstance(g, JointGripperForceTarget):
+        return {"mode": "force", "force": g.force}
+    return {
+        "mode": "move",
+        "width": g.width,
+        "force_limit": g.force,
+        "velocity": g.velocity,
+    }
 
 
-def joint_gripper_target_from_dict(d: Optional[dict]) -> Optional[JointGripperTarget]:
+def joint_gripper_target_from_dict(
+    d: Optional[dict],
+) -> Optional[JointGripperTarget | JointGripperForceTarget]:
     if d is None:
         return None
-    _require_exact_keys(d, {"width", "force", "velocity"}, context="JointGripperTarget")
+    if not isinstance(d, dict):
+        raise ValueError("JointWaypoint.gripper must be an object or null")
+    mode = d.get("mode")
+    if mode == "force":
+        _require_exact_keys(d, {"mode", "force"}, context="JointGripperForceTarget")
+        return JointGripperForceTarget(
+            force=_require_json_number(
+                d["force"], context="JointGripperForceTarget.force"
+            )
+        )
+    if mode != "move":
+        raise ValueError("JointWaypoint.gripper.mode must be 'move' or 'force'")
+    _require_exact_keys(
+        d,
+        {"mode", "width", "force_limit", "velocity"},
+        context="JointGripperTarget",
+    )
     return JointGripperTarget(
         width=_require_json_number(d["width"], context="JointGripperTarget.width"),
-        force=_require_json_number(d["force"], context="JointGripperTarget.force"),
+        force=_require_json_number(
+            d["force_limit"], context="JointGripperTarget.force_limit"
+        ),
         velocity=_require_optional_json_number(
             d["velocity"], context="JointGripperTarget.velocity"
         ),

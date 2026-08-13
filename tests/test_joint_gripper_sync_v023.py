@@ -100,7 +100,7 @@ def test_strict_prefix_32_1_is_authoritative_and_never_stretched():
         JointTrajectoryInterpolator(too_fast, q0, 100.0, max_joint_speed=np.full(7, 1.0))
 
 
-def test_joint_v3_schema_round_trip_and_old_or_loose_payload_refusal():
+def test_joint_v4_schema_round_trip_and_old_or_loose_payload_refusal():
     q0 = np.zeros(7)
     traj = strict_traj(q0, [q0], [2], [JointGripperTarget(width=0.079, velocity=None)])
     payload = P.joint_trajectory_to_dict(traj)
@@ -128,7 +128,7 @@ def test_joint_v3_schema_round_trip_and_old_or_loose_payload_refusal():
         lambda d: d["waypoints"][0]["positions"].__setitem__(0, True),
         lambda d: d["waypoints"][0].__setitem__("n_frames", 2.0),
         lambda d: d["waypoints"][0]["gripper"].__setitem__("width", "0.079"),
-        lambda d: d["waypoints"][0]["gripper"].__setitem__("force", True),
+        lambda d: d["waypoints"][0]["gripper"].__setitem__("force_limit", True),
         lambda d: d["waypoints"][0]["gripper"].__setitem__("velocity", "0.05"),
     ):
         invalid = copy.deepcopy(payload)

@@ -31,6 +31,7 @@ from .trajectory import (
     CartesianDelta,
     CartesianWaypoint,
     ExecutionResult,
+    JointGripperForceTarget,
     JointTrajectory,
     JointWaypoint,
 )
@@ -909,6 +910,7 @@ class Robot:
                         )
             gripper_events: list[dict] = []
             previous_width = gripper_execution_anchor
+            previous_force: Optional[float] = None
             boundary_tick = 0
             for segment, (wp, requested_ticks, scheduled_ticks) in enumerate(
                 zip(
@@ -921,6 +923,30 @@ class Robot:
                 if wp.gripper is None:
                     continue
                 target = wp.gripper
+                if isinstance(target, JointGripperForceTarget):
+                    if runtime_gripper is not None:
+                        force_lo = float(runtime_gripper["min_force_n"])
+                        force_hi = float(runtime_gripper["max_force_n"])
+                        if not force_lo <= target.force <= force_hi:
+                            raise ValueError(
+                                f"JointWaypoint {segment} gripper force={target.force!r} "
+                                f"outside runtime [{force_lo}, {force_hi}] from "
+                                "flexivrdk.Gripper.params"
+                            )
+                    gripper_events.append(
+                        {
+                            "mode": "force",
+                            "segment": segment,
+                            "requested_segment_ticks": requested_ticks,
+                            "scheduled_segment_ticks": scheduled_ticks,
+                            "start_tick": boundary_tick - scheduled_ticks,
+                            "end_tick": boundary_tick,
+                            "force_n": target.force,
+                            "dispatch": previous_force != target.force,
+                        }
+                    )
+                    previous_force = target.force
+                    continue
                 delta_width = abs(target.width - previous_width)
                 segment_duration = scheduled_ticks * self.dt
                 required_velocity = delta_width / segment_duration
@@ -953,6 +979,7 @@ class Robot:
                             )
                 gripper_events.append(
                     {
+                        "mode": "move",
                         "segment": segment,
                         "requested_segment_ticks": requested_ticks,
                         "scheduled_segment_ticks": scheduled_ticks,
@@ -967,6 +994,7 @@ class Robot:
                     }
                 )
                 previous_width = target.width
+                previous_force = None
         except ValueError as exc:
             raise TrajectoryPrevalidationError(str(exc)) from exc
 
@@ -986,6 +1014,7 @@ class Robot:
         result.log["initial_gripper_target_m"] = initial_gripper
         result.log["gripper_execution_anchor_m"] = gripper_execution_anchor
         result.log["ending_gripper_target_m"] = previous_width
+        result.log["ending_gripper_force_n"] = previous_force
         result.log["gripper_events"] = gripper_events
         result.log["gripper_tracking"] = []
 
@@ -1006,7 +1035,8 @@ class Robot:
         self.filter.reset(start_state, q=joint_filter_anchor)
 
         events_by_segment = {event["segment"]: event for event in gripper_events}
-        active_gripper_target = gripper_execution_anchor
+        active_gripper_target: Optional[float] = gripper_execution_anchor
+        active_gripper_force: Optional[float] = None
         first_gripper_event_checked = False
         t_loop = time.perf_counter()
         execution_started = t_loop
@@ -1050,11 +1080,12 @@ class Robot:
                 self.filter.reset(state, q=joint_filter_anchor)
                 previous_command = joint_filter_anchor.copy()
                 active_gripper_target = gripper_execution_anchor
+                active_gripper_force = None
             if interp.current_segment_tick == 1:
                 event = events_by_segment.get(interp.current_segment)
                 if event is not None:
                     event["measured_width_at_dispatch_m"] = state.gripper_width
-                    if not first_gripper_event_checked:
+                    if event["mode"] == "move" and not first_gripper_event_checked:
                         first_gripper_event_checked = True
                         measured_width = float(state.gripper_width)
                         delta_width = abs(event["target_width_m"] - measured_width)
@@ -1107,7 +1138,17 @@ class Robot:
                         event["dispatch"] = delta_width > 1e-12
                         gripper_execution_anchor = measured_width
                         result.log["gripper_execution_anchor_m"] = measured_width
-                    if event["dispatch"]:
+                    if event["mode"] == "force" and event["dispatch"]:
+                        self.backend.move_gripper(
+                            GripperCommand(
+                                width=float(state.gripper_width),
+                                force=event["force_n"],
+                                grasp=True,
+                            )
+                        )
+                        active_gripper_target = None
+                        active_gripper_force = event["force_n"]
+                    elif event["mode"] == "move" and event["dispatch"]:
                         self.backend.move_gripper(
                             GripperCommand(
                                 width=event["target_width_m"],
@@ -1116,7 +1157,8 @@ class Robot:
                                 grasp=False,
                             )
                         )
-                    active_gripper_target = event["target_width_m"]
+                        active_gripper_target = event["target_width_m"]
+                        active_gripper_force = None
             if not result.success:
                 break
             sr = self.filter.filter_joint(q, state)
@@ -1140,8 +1182,13 @@ class Robot:
                 {
                     "tick": streamed_ticks,
                     "target_width_m": active_gripper_target,
+                    "target_force_n": active_gripper_force,
                     "measured_width_m": state.gripper_width,
-                    "error_m": active_gripper_target - state.gripper_width,
+                    "error_m": (
+                        None
+                        if active_gripper_target is None
+                        else active_gripper_target - state.gripper_width
+                    ),
                 }
             )
             t_loop += self.dt
@@ -1155,7 +1202,9 @@ class Robot:
         result.final_state = self.get_state()
         result.gripper_width_final = result.final_state.gripper_width
         result.log["final_gripper_tracking_error_m"] = (
-            previous_width - result.final_state.gripper_width
+            None
+            if previous_force is not None
+            else previous_width - result.final_state.gripper_width
         )
         if raise_on_stop and not result.success:
             raise TrajectoryStoppedError(result)
