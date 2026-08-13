@@ -559,6 +559,73 @@ class JointTrajectory:
                 raise ValueError("strict_timing gripper waypoints require initial_gripper_width")
 
 
+@dataclass
+class JointTorqueWaypoint:
+    """One smooth arm-torque endpoint and its exact controller duration."""
+
+    torques: np.ndarray
+    n_frames: int
+    gripper: Optional[
+        Union[JointGripperTarget, JointGripperForceTarget, GripperCommand]
+    ] = None
+
+    def __post_init__(self) -> None:
+        self.torques = np.asarray(self.torques, dtype=float).reshape(-1)
+        if not np.all(np.isfinite(self.torques)):
+            raise ValueError("JointTorqueWaypoint.torques must be finite")
+        if isinstance(self.n_frames, (bool, np.bool_)):
+            raise ValueError("JointTorqueWaypoint.n_frames must be an integer")
+        self.n_frames = int(self.n_frames)
+        if self.n_frames <= 0:
+            raise ValueError("JointTorqueWaypoint.n_frames must be positive")
+        if isinstance(self.gripper, GripperCommand):
+            if self.gripper.grasp:
+                self.gripper = JointGripperForceTarget(
+                    force=self.gripper.force
+                )
+            else:
+                self.gripper = JointGripperTarget(
+                    width=self.gripper.width,
+                    force=self.gripper.force,
+                    velocity=self.gripper.velocity,
+                )
+
+
+@dataclass
+class JointTorqueTrajectory:
+    """Gravity-compensated arm torque plus synchronized gripper effort.
+
+    ``initial_torques`` is the command immediately before the first emitted
+    tick. Every segment linearly approaches its endpoint, satisfying Flexiv's
+    requirement that streamed torque commands remain smooth and continuous.
+    """
+
+    waypoints: List[JointTorqueWaypoint]
+    initial_torques: np.ndarray
+    max_joint_torque_scale: float = 0.30
+    safety_profile: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.waypoints:
+            raise ValueError("JointTorqueTrajectory needs at least one waypoint")
+        self.initial_torques = np.asarray(
+            self.initial_torques, dtype=float
+        ).reshape(-1)
+        if not np.all(np.isfinite(self.initial_torques)):
+            raise ValueError("initial_torques must be finite")
+        if any(
+            waypoint.torques.shape != self.initial_torques.shape
+            for waypoint in self.waypoints
+        ):
+            raise ValueError("all torque waypoints must match initial_torques")
+        self.max_joint_torque_scale = float(self.max_joint_torque_scale)
+        if (
+            not np.isfinite(self.max_joint_torque_scale)
+            or not 0.0 < self.max_joint_torque_scale <= 1.0
+        ):
+            raise ValueError("max_joint_torque_scale must be in (0, 1]")
+
+
 # ----------------------------------------------------------------------------
 # Execution report -- quantifies the "execution" failure category
 # ----------------------------------------------------------------------------

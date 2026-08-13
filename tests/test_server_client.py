@@ -67,10 +67,10 @@ def test_server_info_is_read_only_and_pins_trajectory_protocol(server, monkeypat
     finally:
         robot.close()
 
-    assert first["schema"] == "flexiv-control.server-info.v4"
+    assert first["schema"] == "flexiv-control.server-info.v5"
     assert first["package"] == "flexiv-control"
     assert first["package_version"] == __version__
-    assert first["protocol_id"] == "flexiv-control.trajectory-rpc.v4"
+    assert first["protocol_id"] == "flexiv-control.trajectory-rpc.v5"
     assert first["protocol_fingerprint_sha256"] == P.PROTOCOL_FINGERPRINT_SHA256
     assert first["source_fingerprint_sha256"] == P.SOURCE_FINGERPRINT_SHA256
     assert first["control_hz"] == pytest.approx(200.0)
@@ -80,6 +80,7 @@ def test_server_info_is_read_only_and_pins_trajectory_protocol(server, monkeypat
     assert P.PROTOCOL_CONTRACT["trajectory_rpcs"] == {
         "execute_cartesian_trajectory": "traj",
         "execute_joint_trajectory": "traj",
+        "execute_joint_torque_trajectory": "traj",
     }
     assert P.PROTOCOL_CONTRACT["identity_rpc"]["runtime_fields"] == {
         "required": ["control_hz", "active_safety_profile"],

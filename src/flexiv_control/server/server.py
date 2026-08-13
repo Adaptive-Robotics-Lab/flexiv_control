@@ -288,6 +288,9 @@ class FlexivControlServer:
             "servo_cartesian_pose": self._h_servo_cartesian_pose,
             "execute_cartesian_trajectory": self._h_execute_cartesian_trajectory,
             "execute_joint_trajectory": self._h_execute_joint_trajectory,
+            "execute_joint_torque_trajectory": (
+                self._h_execute_joint_torque_trajectory
+            ),
             "move_joint": self._h_move_joint,
             "command_gripper": self._h_command_gripper,
             "home": self._h_home,
@@ -470,6 +473,24 @@ class FlexivControlServer:
                 self._reset_joint_target_continuity()
                 r.log["continuity_reset"] = r.stop_reason
         return {"result": P.result_to_dict(r)}
+
+    def _h_execute_joint_torque_trajectory(self, p: dict) -> dict:
+        owner = self._require_lease(p)
+        if p.get("protocol_id") != P.PROTOCOL_ID:
+            raise ValueError(
+                f"protocol_id must be {P.PROTOCOL_ID!r}; old torque payload refused"
+            )
+        if (
+            p.get("protocol_fingerprint_sha256")
+            != P.PROTOCOL_FINGERPRINT_SHA256
+        ):
+            raise ValueError("protocol fingerprint mismatch")
+        traj = P.joint_torque_trajectory_from_dict(p["traj"])
+        with self._motion_lock(owner):
+            self._reset_joint_target_continuity()
+            result = self.robot.execute_joint_torque_trajectory(traj)
+            self._reset_joint_target_continuity()
+        return {"result": P.result_to_dict(result)}
 
     def _h_move_joint(self, p: dict) -> dict:
         owner = self._require_lease(p)

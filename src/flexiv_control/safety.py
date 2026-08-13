@@ -50,6 +50,7 @@ class SafetyProfile:
     # Joint limits (margin shrinks the hard limits; speed scale caps velocity).
     joint_margin_rad: float = 0.08
     max_joint_speed_scale: float = 0.30
+    max_joint_torque_scale: float = 0.30
     # Hard joint position limits (Rizon 4/4s nominal; override per robot).
     joint_lower: np.ndarray = field(
         default_factory=lambda: np.array(
@@ -114,6 +115,9 @@ class SafetyProfile:
         jl = d.get("joint_limits", {})
         p.joint_margin_rad = jl.get("margin_rad", p.joint_margin_rad)
         p.max_joint_speed_scale = jl.get("max_joint_speed_scale", p.max_joint_speed_scale)
+        p.max_joint_torque_scale = jl.get(
+            "max_joint_torque_scale", p.max_joint_torque_scale
+        )
         if "lower" in jl:
             p.joint_lower = np.asarray(jl["lower"], float)
         if "upper" in jl:
@@ -153,6 +157,7 @@ class SafetyProfile:
             "joint_limits": {
                 "margin_rad": self.joint_margin_rad,
                 "max_joint_speed_scale": self.max_joint_speed_scale,
+                "max_joint_torque_scale": self.max_joint_torque_scale,
                 "lower": self.joint_lower.tolist(),
                 "upper": self.joint_upper.tolist(),
             },

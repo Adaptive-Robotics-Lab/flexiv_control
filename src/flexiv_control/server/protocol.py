@@ -39,6 +39,8 @@ from ..trajectory import (
     JointGripperTarget,
     JointTrajectory,
     JointWaypoint,
+    JointTorqueTrajectory,
+    JointTorqueWaypoint,
 )
 from ..types import (
     ControlMode,
@@ -51,9 +53,10 @@ from ..types import (
 )
 
 DEFAULT_PORT = 8766
-SERVER_INFO_SCHEMA = "flexiv-control.server-info.v4"
-PROTOCOL_ID = "flexiv-control.trajectory-rpc.v4"
+SERVER_INFO_SCHEMA = "flexiv-control.server-info.v5"
+PROTOCOL_ID = "flexiv-control.trajectory-rpc.v5"
 JOINT_TRAJECTORY_SCHEMA = "flexiv-control.joint-trajectory.v4"
+JOINT_TORQUE_TRAJECTORY_SCHEMA = "flexiv-control.joint-torque-trajectory.v1"
 
 # Canonical, path-independent description of the wire seam that must agree
 # across the planner client and robot-side server.  In particular, this pins
@@ -79,6 +82,7 @@ PROTOCOL_CONTRACT = {
     "trajectory_rpcs": {
         "execute_cartesian_trajectory": "traj",
         "execute_joint_trajectory": "traj",
+        "execute_joint_torque_trajectory": "traj",
     },
     "joint_trajectory_contract": {
         "schema": JOINT_TRAJECTORY_SCHEMA,
@@ -111,6 +115,15 @@ PROTOCOL_CONTRACT = {
         "gripper": "explicit-Move-or-signed-Grasp-concurrent-at-segment-boundary",
         "interpolation": ["cosine", "linear"],
         "max_joint_speed_scale": "finite-(0,1]-active-profile-ceiling",
+    },
+    "joint_torque_trajectory_contract": {
+        "schema": JOINT_TORQUE_TRAJECTORY_SCHEMA,
+        "action": "gravity-compensated-joint-torque-nm",
+        "rate_hz": 1000,
+        "interpolation": "linear",
+        "limits": "RobotInfo.tau_max-times-active-profile-scale",
+        "firmware_soft_limits": True,
+        "gripper": "synchronized-signed-force-at-segment-boundary",
     },
 }
 
@@ -586,4 +599,75 @@ def joint_trajectory_from_dict(d: dict) -> JointTrajectory:
         interpolation=d["interpolation"],
         strict_timing=d["strict_timing"],
         safety_profile=d["safety_profile"],
+    )
+
+
+def joint_torque_trajectory_to_dict(c: JointTorqueTrajectory) -> dict:
+    return {
+        "schema": JOINT_TORQUE_TRAJECTORY_SCHEMA,
+        "initial_torques": c.initial_torques.tolist(),
+        "waypoints": [
+            {
+                "torques": waypoint.torques.tolist(),
+                "n_frames": waypoint.n_frames,
+                "gripper": joint_gripper_target_to_dict(waypoint.gripper),
+            }
+            for waypoint in c.waypoints
+        ],
+        "max_joint_torque_scale": c.max_joint_torque_scale,
+        "safety_profile": c.safety_profile,
+    }
+
+
+def joint_torque_trajectory_from_dict(d: dict) -> JointTorqueTrajectory:
+    _require_exact_keys(
+        d,
+        {
+            "schema",
+            "initial_torques",
+            "waypoints",
+            "max_joint_torque_scale",
+            "safety_profile",
+        },
+        context="JointTorqueTrajectory",
+    )
+    if d["schema"] != JOINT_TORQUE_TRAJECTORY_SCHEMA:
+        raise ValueError("unsupported JointTorqueTrajectory schema")
+    if not isinstance(d["waypoints"], list) or not d["waypoints"]:
+        raise ValueError("JointTorqueTrajectory.waypoints must be non-empty")
+    waypoints = []
+    for index, waypoint in enumerate(d["waypoints"]):
+        _require_exact_keys(
+            waypoint,
+            {"torques", "n_frames", "gripper"},
+            context=f"JointTorqueTrajectory.waypoints[{index}]",
+        )
+        frames = waypoint["n_frames"]
+        if isinstance(frames, bool) or not isinstance(frames, int):
+            raise ValueError("JointTorqueWaypoint.n_frames must be an integer")
+        waypoints.append(
+            JointTorqueWaypoint(
+                torques=np.asarray(
+                    _require_json_number_array(
+                        waypoint["torques"],
+                        context=f"waypoints[{index}].torques",
+                    ),
+                    dtype=float,
+                ),
+                n_frames=frames,
+                gripper=joint_gripper_target_from_dict(waypoint["gripper"]),
+            )
+        )
+    return JointTorqueTrajectory(
+        waypoints=waypoints,
+        initial_torques=np.asarray(
+            _require_json_number_array(
+                d["initial_torques"], context="initial_torques"
+            ),
+            dtype=float,
+        ),
+        max_joint_torque_scale=_require_json_number(
+            d["max_joint_torque_scale"], context="max_joint_torque_scale"
+        ),
+        safety_profile=str(d["safety_profile"]),
     )

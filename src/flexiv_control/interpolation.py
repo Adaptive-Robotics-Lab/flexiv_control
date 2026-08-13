@@ -212,6 +212,30 @@ class JointTrajectoryInterpolator:
         return list(iter(self))
 
 
+class JointTorqueTrajectoryInterpolator:
+    """Linear interpolation of direct torque endpoints at controller rate."""
+
+    def __init__(self, traj, control_hz: float):
+        del control_hz  # n_frames is authoritative by contract.
+        self.traj = traj
+        self.current_segment = 0
+        self.current_segment_tick = 0
+        self.scheduled_total_ticks = int(
+            sum(waypoint.n_frames for waypoint in traj.waypoints)
+        )
+
+    def __iter__(self):
+        previous = self.traj.initial_torques.copy()
+        for segment, waypoint in enumerate(self.traj.waypoints):
+            self.current_segment = segment
+            for tick in range(1, waypoint.n_frames + 1):
+                self.current_segment_tick = tick
+                yield previous + (tick / waypoint.n_frames) * (
+                    waypoint.torques - previous
+                )
+            previous = waypoint.torques.copy()
+
+
 def delta_to_target_pose(delta: CartesianDelta, current_pose: np.ndarray) -> np.ndarray:
     """Integrate a relative delta onto the current pose -> absolute target.
 

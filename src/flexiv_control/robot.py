@@ -32,6 +32,7 @@ from .trajectory import (
     CartesianWaypoint,
     ExecutionResult,
     JointGripperForceTarget,
+    JointTorqueTrajectory,
     JointTrajectory,
     JointWaypoint,
 )
@@ -39,6 +40,7 @@ from .backends import RobotBackend, get_backend
 from .config import RobotConfig, load_safety_profile
 from .interpolation import (
     CartesianTrajectoryInterpolator,
+    JointTorqueTrajectoryInterpolator,
     JointTrajectoryInterpolator,
     delta_to_target_pose,
 )
@@ -104,6 +106,16 @@ class Robot:
             2.0,
             dtype=float,
         )
+        self._joint_torque_limits: Optional[np.ndarray] = None
+        # Torque streaming is stateful across receding-horizon RPCs.  The next
+        # trajectory must begin at the last command actually acknowledged by
+        # this Robot instance (zero after connect, stop, or a mode switch), so
+        # a client cannot introduce an unverified first-tick torque jump.
+        self._last_joint_torque_command = np.zeros(
+            self.cfg.n_joints,
+            dtype=float,
+        )
+        self._active_stream_mode: Optional[ControlMode] = None
         self._effective_joint_contract: Optional[dict] = None
         self._apply_runtime_joint_contract()
         # Cooperative cancel: another thread (e.g. the server's stop handler)
@@ -117,7 +129,11 @@ class Robot:
         """Per-backend construction kwargs drawn from the config."""
         b = self.cfg.backend.lower()
         if b in ("flexiv_rdk", "rdk", "flexiv"):
-            return dict(robot_sn=self.cfg.robot_sn, gripper_name=self.cfg.gripper_name)
+            return dict(
+                robot_sn=self.cfg.robot_sn,
+                gripper_name=self.cfg.gripper_name,
+                allow_torque=self.cfg.allow_joint_torque,
+            )
         if b in ("mujoco", "mjx"):
             return dict(
                 model_path=self.cfg.model_path,
@@ -141,7 +157,15 @@ class Robot:
     # -- lifecycle -----------------------------------------------------------
     def connect(self) -> None:
         self.backend.connect()
+        self._reset_joint_torque_continuity()
         self._apply_runtime_joint_contract()
+
+    def _reset_joint_torque_continuity(self) -> None:
+        self._last_joint_torque_command = np.zeros(
+            self.cfg.n_joints,
+            dtype=float,
+        )
+        self._active_stream_mode = None
 
     def _apply_runtime_joint_contract(self) -> None:
         """Intersect configured limits with cached hardware/firmware facts."""
@@ -150,6 +174,7 @@ class Robot:
         lower = np.asarray(self.profile.joint_lower, dtype=float).reshape(-1)
         upper = np.asarray(self.profile.joint_upper, dtype=float).reshape(-1)
         velocity = np.full(lower.shape, 2.0, dtype=float)
+        torque: Optional[np.ndarray] = None
         sources = ["configured_safety_profile"]
 
         if runtime is not None:
@@ -165,6 +190,12 @@ class Robot:
                 runtime["velocity_max_rad_s"],
                 dtype=float,
             ).reshape(-1)
+            runtime_torque_raw = runtime.get("torque_max_nm")
+            runtime_torque = (
+                None
+                if runtime_torque_raw is None
+                else np.asarray(runtime_torque_raw, dtype=float).reshape(-1)
+            )
             if not (
                 runtime_lower.shape == runtime_upper.shape == runtime_velocity.shape == lower.shape
             ):
@@ -175,6 +206,16 @@ class Robot:
             lower = np.maximum(lower, runtime_lower)
             upper = np.minimum(upper, runtime_upper)
             velocity = runtime_velocity
+            if runtime_torque is not None:
+                if (
+                    runtime_torque.shape != lower.shape
+                    or not np.all(np.isfinite(runtime_torque))
+                    or np.any(runtime_torque <= 0.0)
+                ):
+                    raise RuntimeError(
+                        "runtime RobotInfo joint torque limits are invalid"
+                    )
+                torque = runtime_torque
             sources.append(str(runtime.get("source", "runtime_joint_limits")))
         elif self.cfg.backend.lower() in ("flexiv_rdk", "rdk", "flexiv"):
             # A hardware deployment must never fall back to the old uniform
@@ -234,6 +275,7 @@ class Robot:
         self.profile.joint_lower = lower
         self.profile.joint_upper = upper
         self._joint_velocity_limits = velocity
+        self._joint_torque_limits = torque
         self.filter.set_profile(self.profile)
         self.filter.set_joint_velocity_limits(velocity)
         enforced_lower = lower + self.profile.joint_margin_rad
@@ -248,7 +290,12 @@ class Robot:
             "enforced_position_max_rad": enforced_upper.tolist(),
             "base_velocity_max_rad_s": velocity.tolist(),
             "max_joint_speed_scale": float(self.profile.max_joint_speed_scale),
+            "max_joint_torque_scale": float(
+                self.profile.max_joint_torque_scale
+            ),
         }
+        if torque is not None:
+            contract["base_torque_max_nm"] = torque.tolist()
         payload = json.dumps(
             contract,
             sort_keys=True,
@@ -278,6 +325,7 @@ class Robot:
         return info
 
     def disconnect(self) -> None:
+        self._reset_joint_torque_continuity()
         self.backend.disconnect()
 
     def __enter__(self) -> "Robot":
@@ -347,6 +395,8 @@ class Robot:
             nullspace_q=nullspace_q if nullspace_q is not None else self.cfg.q_home,
             max_contact_wrench=self.profile.max_contact_wrench,
         )
+        self._reset_joint_torque_continuity()
+        self._active_stream_mode = mode
 
     def start_joint_impedance(
         self,
@@ -356,6 +406,26 @@ class Robot:
     ) -> None:
         mode = ControlMode.RT_JOINT_IMPEDANCE if realtime else ControlMode.NRT_JOINT_IMPEDANCE
         self.backend.set_mode(mode, joint_impedance=joint_impedance or JointImpedanceParams())
+        self._reset_joint_torque_continuity()
+        self._active_stream_mode = mode
+
+    def start_joint_torque(self) -> None:
+        """Enter the explicitly enabled 1 kHz gravity-compensated torque mode."""
+        if not self.cfg.allow_joint_torque:
+            raise RuntimeError(
+                "joint torque control is disabled by RobotConfig"
+            )
+        if abs(self.control_hz - 1000.0) > 1e-9:
+            raise RuntimeError(
+                "RT_JOINT_TORQUE requires control_hz=1000"
+            )
+        if self._active_stream_mode != ControlMode.RT_JOINT_TORQUE:
+            self._last_joint_torque_command = np.zeros(
+                self.cfg.n_joints,
+                dtype=float,
+            )
+            self.backend.set_mode(ControlMode.RT_JOINT_TORQUE)
+            self._active_stream_mode = ControlMode.RT_JOINT_TORQUE
 
     # -- the RL / MPC / teleop workhorse ------------------------------------
     def servo_cartesian_delta(
@@ -1210,6 +1280,193 @@ class Robot:
             raise TrajectoryStoppedError(result)
         return result
 
+    def execute_joint_torque_trajectory(
+        self,
+        traj: JointTorqueTrajectory,
+        *,
+        raise_on_stop: bool = False,
+    ) -> ExecutionResult:
+        """Stream a prevalidated smooth torque trajectory at exactly 1 kHz."""
+        self._check_lease()
+        result = ExecutionResult(success=True)
+        try:
+            self._verify_trajectory_profile(traj.safety_profile, result)
+        except ValueError as exc:
+            raise TrajectoryPrevalidationError(str(exc)) from exc
+        if not self.cfg.allow_joint_torque:
+            raise TrajectoryPrevalidationError(
+                "joint torque control is disabled by RobotConfig"
+            )
+        if abs(self.control_hz - 1000.0) > 1e-9:
+            raise TrajectoryPrevalidationError(
+                "JointTorqueTrajectory requires control_hz=1000"
+            )
+        if self._joint_torque_limits is None:
+            raise TrajectoryPrevalidationError(
+                "backend did not publish RobotInfo.tau_max"
+            )
+        requested_scale = float(traj.max_joint_torque_scale)
+        active_scale = float(self.profile.max_joint_torque_scale)
+        if requested_scale > active_scale + 1e-12:
+            raise TrajectoryPrevalidationError(
+                "JointTorqueTrajectory torque scale exceeds active profile"
+            )
+        command_limit = self._joint_torque_limits * requested_scale
+        expected_initial = (
+            self._last_joint_torque_command
+            if self._active_stream_mode == ControlMode.RT_JOINT_TORQUE
+            else np.zeros(self.cfg.n_joints, dtype=float)
+        )
+        if (
+            traj.initial_torques.shape != expected_initial.shape
+            or not np.array_equal(traj.initial_torques, expected_initial)
+        ):
+            raise TrajectoryPrevalidationError(
+                "initial_torques do not match the last acknowledged torque "
+                "command (zero is required after connect, stop, or mode switch)"
+            )
+        commands = JointTorqueTrajectoryInterpolator(traj, self.control_hz)
+        segment_ticks = [waypoint.n_frames for waypoint in traj.waypoints]
+        for label, value in [
+            ("initial_torques", traj.initial_torques),
+            *[
+                (f"waypoints[{index}].torques", waypoint.torques)
+                for index, waypoint in enumerate(traj.waypoints)
+            ],
+        ]:
+            if value.shape != command_limit.shape:
+                raise TrajectoryPrevalidationError(
+                    f"{label} must have {command_limit.size} values"
+                )
+            if np.any(np.abs(value) > command_limit + 1e-12):
+                raise TrajectoryPrevalidationError(
+                    f"{label} exceeds scaled RobotInfo.tau_max"
+                )
+
+        runtime_gripper = self.backend.runtime_info().get("gripper_limits")
+        for index, waypoint in enumerate(traj.waypoints):
+            target = waypoint.gripper
+            if isinstance(target, JointGripperForceTarget) and runtime_gripper:
+                if not (
+                    float(runtime_gripper["min_force_n"])
+                    <= target.force
+                    <= float(runtime_gripper["max_force_n"])
+                ):
+                    raise TrajectoryPrevalidationError(
+                        f"waypoints[{index}] gripper force outside runtime limits"
+                    )
+
+        state = self.get_state()
+        if (
+            self.backend.in_fault()
+            or state.safety_status != SafetyStatus.OK
+            or np.any(np.abs(state.wrench) > self.profile.max_contact_wrench)
+        ):
+            result.success = False
+            result.stop_reason = StopReason.BACKEND_FAULT.value
+            result.final_state = state
+            return result
+        self.start_joint_torque()
+        events = {
+            sum(item.n_frames for item in traj.waypoints[:index]): item.gripper
+            for index, item in enumerate(traj.waypoints)
+            if item.gripper is not None
+        }
+        start = time.perf_counter()
+        next_tick = start
+        streamed = 0
+        for command in commands:
+            if self._cancel.is_set():
+                self._cancel.clear()
+                self.backend.stop()
+                self._reset_joint_torque_continuity()
+                result.success = False
+                result.stop_reason = StopReason.USER.value
+                break
+            state = self.get_state()
+            if self.backend.in_fault() or np.any(
+                np.abs(state.wrench) > self.profile.max_contact_wrench
+            ):
+                self.backend.stop()
+                self._reset_joint_torque_continuity()
+                result.success = False
+                result.stop_reason = (
+                    StopReason.BACKEND_FAULT.value
+                    if self.backend.in_fault()
+                    else StopReason.CONTACT_WRENCH.value
+                )
+                break
+            target = events.get(streamed)
+            if isinstance(target, JointGripperForceTarget):
+                self.backend.move_gripper(
+                    GripperCommand(
+                        width=state.gripper_width,
+                        force=target.force,
+                        grasp=True,
+                    )
+                )
+            elif target is not None:
+                self.backend.move_gripper(
+                    GripperCommand(
+                        width=target.width,
+                        force=target.force,
+                        velocity=target.velocity or 0.1,
+                        grasp=False,
+                    )
+                )
+            self.backend.stream_joint_torque(command)
+            self._last_joint_torque_command = np.asarray(
+                command,
+                dtype=float,
+            ).copy()
+            streamed += 1
+            next_tick += self.dt
+            delay = next_tick - time.perf_counter()
+            if delay > 0.0:
+                time.sleep(delay)
+        result.executed_duration = time.perf_counter() - start
+        result.log.update({
+            "control_mode": ControlMode.RT_JOINT_TORQUE.value,
+            "streamed_ticks": streamed,
+            "gravity_compensation": True,
+            "soft_limits": True,
+            "base_torque_max_nm": self._joint_torque_limits.tolist(),
+            "requested_max_joint_torque_scale": requested_scale,
+            "effective_torque_max_nm": command_limit.tolist(),
+            "requested_segment_ticks": segment_ticks,
+            "scheduled_segment_ticks": segment_ticks,
+            "requested_total_ticks": sum(segment_ticks),
+            "scheduled_total_ticks": sum(segment_ticks),
+            "strict_timing": True,
+            "acknowledged_ending_joint_torque_nm": (
+                self._last_joint_torque_command.tolist()
+                if result.success else None
+            ),
+            "ending_gripper_force_n": (
+                traj.waypoints[-1].gripper.force
+                if result.success
+                and isinstance(
+                    traj.waypoints[-1].gripper,
+                    JointGripperForceTarget,
+                )
+                else None
+            ),
+            "gripper_events": [
+                {
+                    "mode": "force",
+                    "segment": index,
+                    "force_n": waypoint.gripper.force,
+                }
+                for index, waypoint in enumerate(traj.waypoints)
+                if isinstance(waypoint.gripper, JointGripperForceTarget)
+            ],
+        })
+        result.final_state = self.get_state()
+        result.gripper_width_final = result.final_state.gripper_width
+        if raise_on_stop and not result.success:
+            raise TrajectoryStoppedError(result)
+        return result
+
     # -- gripper / home / stop ----------------------------------------------
     def command_gripper(
         self, cmd: GripperCommand, *, wait: bool = False, timeout: float = 5.0
@@ -1392,6 +1649,7 @@ class Robot:
     def stop(self) -> None:
         self._cancel.set()
         self.backend.stop()
+        self._reset_joint_torque_continuity()
 
 
 def _traj_wrench(traj: CartesianTrajectory):

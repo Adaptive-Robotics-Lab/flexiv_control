@@ -84,6 +84,11 @@ class RobotBackend(abc.ABC):
     @abc.abstractmethod
     def stream_joint(self, q: np.ndarray) -> None: ...
 
+    @abc.abstractmethod
+    def stream_joint_torque(self, tau: np.ndarray) -> None:
+        """Stream one gravity-compensated joint-torque command in Nm."""
+        ...
+
     # -- gripper ------------------------------------------------------------
     @abc.abstractmethod
     def move_gripper(self, cmd: GripperCommand) -> None: ...

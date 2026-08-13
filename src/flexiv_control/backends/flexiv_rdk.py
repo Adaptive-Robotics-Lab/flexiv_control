@@ -275,6 +275,12 @@ class FlexivRdkBackend(RobotBackend):
             size=dof,
             context="RobotInfo",
         )
+        robot_tau_max = _required_vector(
+            robot_info,
+            "tau_max",
+            size=dof,
+            context="RobotInfo",
+        )
         if np.any(robot_q_min >= robot_q_max):
             raise RuntimeError(
                 "Flexiv RDK RobotInfo joint position limits are not ordered"
@@ -282,6 +288,10 @@ class FlexivRdkBackend(RobotBackend):
         if np.any(robot_dq_max <= 0.0):
             raise RuntimeError(
                 "Flexiv RDK RobotInfo joint velocity limits must be > 0"
+            )
+        if np.any(robot_tau_max <= 0.0):
+            raise RuntimeError(
+                "Flexiv RDK RobotInfo joint torque limits must be > 0"
             )
         tool = flexivrdk.Tool(self._robot)
         tool_name = str(tool.name()).strip()
@@ -316,6 +326,7 @@ class FlexivRdkBackend(RobotBackend):
                 "position_min_rad": robot_q_min.tolist(),
                 "position_max_rad": robot_q_max.tolist(),
                 "velocity_max_rad_s": robot_dq_max.tolist(),
+                "torque_max_nm": robot_tau_max.tolist(),
             },
         }
 
@@ -670,6 +681,19 @@ class FlexivRdkBackend(RobotBackend):
             max_vel = [1.0] * self.n_joints
             max_acc = [1.0] * self.n_joints
             self._robot.SendJointPosition(q, zeros, zeros, max_vel, max_acc)
+
+    def stream_joint_torque(self, tau: np.ndarray) -> None:
+        if self._mode != ControlMode.RT_JOINT_TORQUE:
+            raise RuntimeError(
+                "stream_joint_torque requires RT_JOINT_TORQUE mode"
+            )
+        command = [
+            float(value)
+            for value in np.asarray(tau, dtype=float).reshape(self.n_joints)
+        ]
+        # RDK v1.x: nonlinear dynamics compensation and firmware soft limits
+        # remain enabled.  The command is the additional generalized torque.
+        self._robot.StreamJointTorque(command, True, True)
 
     # -- gripper ------------------------------------------------------------
     def move_gripper(self, cmd: GripperCommand) -> None:

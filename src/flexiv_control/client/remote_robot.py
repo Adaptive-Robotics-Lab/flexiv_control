@@ -342,6 +342,32 @@ class RemoteRobot:
             raise TrajectoryStoppedError(result)
         return result
 
+    def execute_joint_torque_trajectory(
+        self, traj, *, raise_on_stop: bool = False
+    ) -> ExecutionResult:
+        info = self.get_server_info()
+        if (
+            info.get("protocol_id") != P.PROTOCOL_ID
+            or info.get("protocol_fingerprint_sha256")
+            != P.PROTOCOL_FINGERPRINT_SHA256
+        ):
+            raise RemoteRobotError(
+                "joint torque trajectory protocol mismatch"
+            )
+        response = self._call(
+            "execute_joint_torque_trajectory",
+            owner=self.owner,
+            protocol_id=P.PROTOCOL_ID,
+            protocol_fingerprint_sha256=P.PROTOCOL_FINGERPRINT_SHA256,
+            traj=P.joint_torque_trajectory_to_dict(traj),
+        )
+        result = P.result_from_dict(response["result"])
+        if raise_on_stop and not result.success:
+            from ..robot import TrajectoryStoppedError
+
+            raise TrajectoryStoppedError(result)
+        return result
+
     def move_joint(
         self,
         q_target,
