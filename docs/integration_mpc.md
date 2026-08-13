@@ -101,6 +101,15 @@ a heartbeat, and installs with only numpy.
 
 ## Strict receding-horizon joint prefixes
 
+For physics-sampling MPC whose action is generalized effort, use
+`JointTorqueTrajectory` instead of the position-target example below. It streams
+seven additional joint torques at 1 kHz with RDK nonlinear-dynamics compensation
+and firmware soft limits enabled, and dispatches an optional
+`JointGripperForceTarget` at the same segment boundaries. This API is disabled by
+default and is admitted only when the deployment, live `RobotInfo.tau_max`,
+safety profile, continuity anchor, and gripper force limits all agree. See
+[`joint_torque_mpc.md`](joint_torque_mpc.md).
+
 Use one atomic `execute_joint_trajectory` call for a multi-segment actuator
 prefix. Knot 0 is the previous commanded target, not a fresh measured-state
 sample; normal physical tracking lag therefore does not bend the next spline.

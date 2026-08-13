@@ -180,13 +180,16 @@ JointTrajectory(
 )
 ```
 
-## `GripperCommand`
+## `GripperCommand` and direct effort MPC
 
-A parallel-jaw gripper is **continuous**, not binary: the canonical/hardware
-command is an opening `width` in metres (+ `force`, `velocity`), matching Flexiv
-RDK `Gripper.Move(width, velocity, force_limit)` / `Gripper.Grasp(force)`. The
-`0/1` you see in learning benchmarks is a normalized *abstraction* on top of this
-continuous width — not a hardware limit.
+The library exposes two explicit, non-interchangeable gripper contracts. Legacy
+position trajectories use opening `width` through Flexiv RDK
+`Gripper.Move(width, velocity, force_limit)`. Direct-effort MPC uses
+`JointGripperForceTarget(force)` through `Gripper.Grasp(force)`: positive Newtons
+close, negative Newtons open, and measured width is state rather than an action.
+The runtime `GripperParams.min_force/max_force` values are authoritative; a
+device that does not support a requested signed force is rejected before any
+trajectory write. Neither contract is an implicit binary open/close flag.
 
 ```python
 GripperCommand(
@@ -198,6 +201,13 @@ GripperCommand(
 
 # normalized learning-layer command [0,1] -> physical width (pass your stroke):
 GripperCommand.from_normalized(0.7, span=0.08)   # width = 0.7 * 0.08 m
+```
+
+For an effort trajectory, use the separately tagged action:
+
+```python
+JointGripperForceTarget(force=-20.0)  # direct opening force, if live limits allow
+JointGripperForceTarget(force=35.0)   # direct closing force
 ```
 
 **`grasp=True` ignores `width` on hardware**: the RDK backend calls

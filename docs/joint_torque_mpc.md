@@ -22,6 +22,12 @@ smooth continuous torque commands. Gripper force events are synchronized with
 the same segment boundaries and remain physical Newton commands, not width
 targets.
 
+This matches the public Flexiv RDK semantics: `Gripper.Grasp(force)` is direct
+force control, with positive force closing and negative force opening. Admission
+is always checked against the connected gripper's live `min_force` and
+`max_force`; the controller never assumes that a particular GN01 firmware
+supports the full signed range.
+
 This API supplies an execution mechanism, not a planner objective. Sampling a
 torque and penalizing squared torque in a cost function are independent design
 choices.

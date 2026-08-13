@@ -399,8 +399,8 @@
         </div>
         <div style="height:14px"></div>
         <div class="card">
-          <h3 style="font-family:var(--disp);font-weight:600;font-size:16px;margin:0 0 8px">Continuous, not binary</h3>
-          <p style="margin:0;color:var(--muted);font-size:14px">A parallel-jaw gripper is continuous width (0–0.10 m), not 0/1. The 4-bar actuator is <code style="font-family:var(--mono);color:var(--blue)">ctrl = 9.404·w − 0.155</code>; <code style="font-family:var(--mono);color:var(--blue)">GripperCommand(width=…)</code> maps straight through.</p>
+          <h3 style="font-family:var(--disp);font-weight:600;font-size:16px;margin:0 0 8px">Continuous position or direct effort</h3>
+          <p style="margin:0;color:var(--muted);font-size:14px">Width trajectories use <code style="font-family:var(--mono);color:var(--blue)">Gripper.Move</code>. Physics-sampling MPC can instead send signed Newton targets with <code style="font-family:var(--mono);color:var(--blue)">JointGripperForceTarget</code> and <code style="font-family:var(--mono);color:var(--blue)">Gripper.Grasp</code>; measured width remains state, not the sampled action.</p>
         </div>
       </div>
     </div>
