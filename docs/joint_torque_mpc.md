@@ -22,6 +22,22 @@ smooth continuous torque commands. Gripper force events are synchronized with
 the same segment boundaries and remain physical Newton commands, not width
 targets.
 
+Keep the planner's dimensionless semantic coordinate separate from the wire
+action. For ActAhead's convention, `latent=+1` means maximum closing force,
+`latent=-1` maximum opening force, and decoding happens exactly once:
+
+```python
+target = JointGripperForceTarget.from_signed_effort_latent(
+    latent,
+    force_limit=80.0,  # deployment value; still checked against live limits
+)
+```
+
+The resulting target stores and transmits only `force` in Newtons. It does not
+transmit the latent or a desired width. Do not use
+`GripperCommand.from_signed_action` for this path: that legacy positional API
+uses the opposite sign convention (`+1` means open) and decodes to metres.
+
 This matches the public Flexiv RDK semantics: `Gripper.Grasp(force)` is direct
 force control, with positive force closing and negative force opening. Admission
 is always checked against the connected gripper's live `min_force` and
@@ -31,3 +47,9 @@ supports the full signed range.
 This API supplies an execution mechanism, not a planner objective. Sampling a
 torque and penalizing squared torque in a cost function are independent design
 choices.
+
+On success, `ExecutionResult.log` acknowledges the physical command endpoints
+as `acknowledged_ending_joint_torque_nm` and
+`acknowledged_ending_gripper_force_n`. `ExecutionResult.final_state` remains
+the measured end state, including gripper width and measured force; callers
+must not reconstruct measured aperture from the semantic latent.

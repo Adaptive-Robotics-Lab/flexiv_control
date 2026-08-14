@@ -11,7 +11,9 @@ from flexiv_control import (
     RobotConfig,
 )
 from flexiv_control.backends.fake import FakeBackend
+from flexiv_control.client import RemoteRobot
 from flexiv_control.robot import TrajectoryPrevalidationError
+from flexiv_control.server import FlexivControlServer
 from flexiv_control.server import protocol as P
 
 
@@ -77,6 +79,70 @@ def test_torque_execution_interpolates_and_uses_runtime_limits() -> None:
     assert result.log["gravity_compensation"] is True
     assert result.log["soft_limits"] is True
     assert result.log["effective_torque_max_nm"] == [30.0] * 7
+    assert result.log["acknowledged_ending_gripper_force_n"] == 40.0
+    assert result.final_state is not None
+    assert result.final_state.gripper_force == 40.0
+
+
+def test_torque_ack_reports_last_dispatched_force_not_last_waypoint_shape() -> None:
+    backend = TorqueRuntimeFake()
+    robot = Robot(
+        RobotConfig(
+            backend="fake", control_hz=1000.0, allow_joint_torque=True
+        ),
+        backend=backend,
+    )
+    robot.connect()
+    traj = JointTorqueTrajectory(
+        initial_torques=np.zeros(7),
+        waypoints=[
+            JointTorqueWaypoint(
+                torques=np.zeros(7),
+                n_frames=1,
+                gripper=JointGripperForceTarget(force=20.0),
+            ),
+            JointTorqueWaypoint(torques=np.zeros(7), n_frames=1),
+        ],
+        max_joint_torque_scale=0.3,
+        safety_profile="tabletop_safe",
+    )
+    result = robot.execute_joint_torque_trajectory(traj)
+    assert result.success
+    assert result.log["ending_gripper_force_n"] == 20.0
+    assert result.log["acknowledged_ending_gripper_force_n"] == 20.0
+    assert result.log["gripper_events"] == [
+        {"mode": "force", "segment": 0, "force_n": 20.0}
+    ]
+
+
+def test_remote_torque_result_preserves_physical_ack_and_measured_end_state() -> None:
+    local = Robot(
+        RobotConfig(
+            backend="fake", control_hz=1000.0, allow_joint_torque=True
+        ),
+        backend=TorqueRuntimeFake(),
+    )
+    server = FlexivControlServer(
+        robot=local,
+        host="127.0.0.1",
+        port=0,
+        host_lock=False,
+    )
+    server.start()
+    assert server._tcp is not None
+    port = server._tcp.server_address[1]
+    server.serve_in_thread()
+    try:
+        with RemoteRobot("127.0.0.1", port, owner="torque-test") as remote:
+            result = remote.execute_joint_torque_trajectory(trajectory())
+        assert result.success
+        assert result.log["acknowledged_ending_joint_torque_nm"] == [10.0] * 7
+        assert result.log["acknowledged_ending_gripper_force_n"] == 40.0
+        assert result.final_state is not None
+        assert result.final_state.gripper_width == pytest.approx(0.08)
+        assert result.final_state.gripper_force == pytest.approx(40.0)
+    finally:
+        server.shutdown()
 
 
 def test_torque_execution_requires_and_preserves_command_continuity() -> None:

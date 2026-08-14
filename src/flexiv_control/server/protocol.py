@@ -119,11 +119,18 @@ PROTOCOL_CONTRACT = {
     "joint_torque_trajectory_contract": {
         "schema": JOINT_TORQUE_TRAJECTORY_SCHEMA,
         "action": "gravity-compensated-joint-torque-nm",
+        "action_units": {"arm": "N.m", "gripper": "N"},
+        "semantic_gripper_latent_on_wire": False,
         "rate_hz": 1000,
         "interpolation": "linear",
         "limits": "RobotInfo.tau_max-times-active-profile-scale",
         "firmware_soft_limits": True,
         "gripper": "synchronized-signed-force-at-segment-boundary",
+        "acknowledged_endpoints": [
+            "acknowledged_ending_joint_torque_nm",
+            "acknowledged_ending_gripper_force_n",
+        ],
+        "measured_endpoint": "ExecutionResult.final_state",
     },
 }
 

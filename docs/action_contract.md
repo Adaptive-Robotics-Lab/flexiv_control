@@ -210,6 +210,18 @@ JointGripperForceTarget(force=-20.0)  # direct opening force, if live limits all
 JointGripperForceTarget(force=35.0)   # direct closing force
 ```
 
+If a planner samples a dimensionless signed-effort latent, decode it exactly
+once before constructing the RPC payload:
+
+```python
+JointGripperForceTarget.from_signed_effort_latent(z, force_limit=80.0)
+# z in [-1,1]: positive closes, negative opens; payload is physical Newtons
+```
+
+This is intentionally different from the legacy positional
+`GripperCommand.from_signed_action`, where positive means open and the decoded
+quantity is a width in metres. Neither latent convention appears on the wire.
+
 **`grasp=True` ignores `width` on hardware**: the RDK backend calls
 `Gripper.Grasp(force)` and the fingers close until contact at the force limit
 -- a planner that encodes close-intent by thresholding width must not expect

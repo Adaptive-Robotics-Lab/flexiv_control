@@ -1375,6 +1375,8 @@ class Robot:
         start = time.perf_counter()
         next_tick = start
         streamed = 0
+        last_gripper_force_commanded: Optional[float] = None
+        dispatched_gripper_events: list[dict] = []
         for command in commands:
             if self._cancel.is_set():
                 self._cancel.clear()
@@ -1405,6 +1407,12 @@ class Robot:
                         grasp=True,
                     )
                 )
+                last_gripper_force_commanded = float(target.force)
+                dispatched_gripper_events.append({
+                    "mode": "force",
+                    "segment": int(commands.current_segment),
+                    "force_n": float(target.force),
+                })
             elif target is not None:
                 self.backend.move_gripper(
                     GripperCommand(
@@ -1414,6 +1422,15 @@ class Robot:
                         grasp=False,
                     )
                 )
+                # The last gripper action is now an exact-width Move, so there
+                # is no longer an acknowledged direct-force endpoint.
+                last_gripper_force_commanded = None
+                dispatched_gripper_events.append({
+                    "mode": "move",
+                    "segment": int(commands.current_segment),
+                    "width_m": float(target.width),
+                    "force_limit_n": float(target.force),
+                })
             self.backend.stream_joint_torque(command)
             self._last_joint_torque_command = np.asarray(
                 command,
@@ -1442,24 +1459,18 @@ class Robot:
                 self._last_joint_torque_command.tolist()
                 if result.success else None
             ),
+            # Both names carry a physical Newton command, never a planner
+            # latent or measured aperture. Keep the historical alias while
+            # exposing the acknowledgement semantics explicitly.
             "ending_gripper_force_n": (
-                traj.waypoints[-1].gripper.force
-                if result.success
-                and isinstance(
-                    traj.waypoints[-1].gripper,
-                    JointGripperForceTarget,
-                )
-                else None
+                last_gripper_force_commanded if result.success else None
             ),
-            "gripper_events": [
-                {
-                    "mode": "force",
-                    "segment": index,
-                    "force_n": waypoint.gripper.force,
-                }
-                for index, waypoint in enumerate(traj.waypoints)
-                if isinstance(waypoint.gripper, JointGripperForceTarget)
-            ],
+            "acknowledged_ending_gripper_force_n": (
+                last_gripper_force_commanded if result.success else None
+            ),
+            # Report events actually dispatched before a stop, rather than all
+            # events merely present in the requested trajectory.
+            "gripper_events": dispatched_gripper_events,
         })
         result.final_state = self.get_state()
         result.gripper_width_final = result.final_state.gripper_width

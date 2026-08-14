@@ -68,6 +68,23 @@ def test_v4_force_and_move_targets_are_explicitly_tagged() -> None:
     }
 
 
+def test_signed_effort_latent_decodes_once_to_physical_newtons() -> None:
+    assert JointGripperForceTarget.from_signed_effort_latent(
+        0.5, force_limit=80.0
+    ).force == pytest.approx(40.0)
+    assert JointGripperForceTarget.from_signed_effort_latent(
+        -1.0, force_limit=80.0
+    ).force == pytest.approx(-80.0)
+    with pytest.raises(ValueError, match=r"\[-1, 1\]"):
+        JointGripperForceTarget.from_signed_effort_latent(
+            1.01, force_limit=80.0
+        )
+    with pytest.raises(ValueError, match="force_limit"):
+        JointGripperForceTarget.from_signed_effort_latent(
+            0.0, force_limit=0.0
+        )
+
+
 def test_v4_rejects_untagged_or_structurally_ambiguous_gripper() -> None:
     payload = P.joint_trajectory_to_dict(_trajectory(20.0))
     untagged = copy.deepcopy(payload)

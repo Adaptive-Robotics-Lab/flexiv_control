@@ -471,6 +471,33 @@ class JointGripperForceTarget:
         if not np.isfinite(self.force):
             raise ValueError("JointGripperForceTarget.force must be finite")
 
+    @classmethod
+    def from_signed_effort_latent(
+        cls,
+        latent: float,
+        *,
+        force_limit: float,
+    ) -> "JointGripperForceTarget":
+        """Decode one planner latent into a physical signed-force target.
+
+        The semantic coordinate is dimensionless and bounded by ``[-1, 1]``:
+        positive closes, negative opens, and zero requests zero force. Only
+        the decoded Newton value is retained by this object or sent over the
+        trajectory RPC. This is deliberately *not* the legacy positional
+        :meth:`GripperCommand.from_signed_action` convention, whose positive
+        endpoint means open.
+
+        ``force_limit`` is explicit rather than a library constant because the
+        connected gripper's runtime limits remain authoritative.
+        """
+        value = float(latent)
+        limit = float(force_limit)
+        if not np.isfinite(value) or not -1.0 <= value <= 1.0:
+            raise ValueError("signed effort latent must be finite and in [-1, 1]")
+        if not np.isfinite(limit) or limit <= 0.0:
+            raise ValueError("force_limit must be finite and > 0")
+        return cls(force=value * limit)
+
 
 @dataclass
 class JointWaypoint:
