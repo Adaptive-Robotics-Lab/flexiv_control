@@ -6,6 +6,114 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Joint trajectories now accept `JointGripperForceTarget(force)` alongside the
+  legacy exact-width target. It dispatches signed native
+  `Gripper.Grasp(force)` at the segment boundary: positive closes, negative
+  opens, and measured width remains state rather than an action.
+
+### Changed
+- The strict trajectory RPC/schema is v4. Gripper targets are explicitly tagged
+  as `move` or `force`, preventing a force action from being decoded as a width.
+
+## [0.2.4] - 2026-08-01
+
+### Fixed
+- Blocking `Gripper.Move` calls now wait for the commanded width instead of
+  accepting pre-motion stillness during GN01 actuation latency. Obstructed
+  stillness remains a valid completion condition only for `Gripper.Grasp`.
+
+## [0.2.3] - 2026-07-31
+
+### Added
+- Joint trajectories can carry an explicit actuator-target knot 0, exact
+  per-waypoint gripper targets, and strict authoritative `n_frames` timing.
+- The server records acknowledged joint and gripper endpoints as provenance
+  while rebasing each feedback-MPC prefix to current measured state.
+
+### Changed
+- The joint trajectory wire schema and trajectory RPC identity are v3 and
+  refuse older or structurally loose payloads before motion.
+- Strict joint trajectories are fully prevalidated against effective runtime
+  joint and `Gripper.params` limits; violations reject instead of clipping or
+  time-stretching. `Gripper.Move` dispatches fire-and-forget at each segment
+  boundary while arm streaming continues in the same RPC.
+
+### Fixed
+- Strict execution now bounds the actual first emitted joint target from
+  measured state on every RPC and derives each prefix's first gripper ramp from
+  measured width; it repeats both checks immediately before dispatch so state
+  drift across a mode transition cannot bypass the bound. Prior acknowledged
+  targets are diagnostic provenance only.
+- Fault/contact gates run before mode or actuator writes, pure prevalidation
+  failures preserve the acknowledged provenance cache, and server lifecycle
+  boundaries clear it.
+- Joint v3 numeric fields reject JSON strings and booleans instead of coercing
+  them into numbers.
+
+## [0.2.2] - 2026-07-31
+
+### Changed
+- Bumped the trajectory RPC identity and server-info schema to v2. The
+  lease-free identity response now binds control rate, active safety profile,
+  connected hardware facts, runtime gripper limits, and the effective joint
+  limit contract.
+- Joint trajectories now carry an explicit linear/cosine interpolation law,
+  honour per-trajectory speed scaling against per-joint runtime limits, and
+  allocate controller ticks from cumulative waypoint time.
+- Flexiv RDK state and gripper-limit reads now fail closed instead of
+  fabricating zero-valued observations or accepting unchecked commands.
+
+## [0.2.1] - 2026-07-30
+
+### Changed
+- Unified the v0.2.0 SpaceMouse/ROS gripper and twist fixes with the canonical
+  trajectory API used by ActAhead (`JointTrajectory`,
+  `execute_joint_trajectory`, and the corresponding wire protocol).
+- Client and robot-control server deployments can now bind to one exact source
+  commit instead of combining the trajectory client from a post-v0.1.8 branch
+  with a divergent v0.2.0 action-chunk server.
+
+## [0.2.0] - 2026-07-09
+
+Fixes from the July 2026 cross-repo audit against `flexiv-spacemouse-teleop`.
+
+### Fixed
+- **SpaceMouse gripper toggle was level-triggered**: holding the button flipped
+  the gripper open/closed once per control tick (~100 Hz on the default loop).
+  It now toggles only on the button's rising edge, tracked every tick (also
+  while the deadman is released and inside `intervention()`), matching the ROS
+  teleop bridge's behaviour.
+- **ROS bridge `~/delta_twist_cmds` treated unitless commands as m/s**: the
+  node advertises itself as a drop-in target for a MoveIt-Servo teleop
+  pipeline, but such pipelines publish joystick-style values in `[-1, 1]` that
+  Servo scales down (0.4 m/s / 0.8 rad/s in the flexiv_ros2 config). Feeding
+  them straight in executed ~2.5x faster than the Servo path. The node now
+  defaults to `twist_in_type: unitless` with matching `twist_scale_linear` /
+  `twist_scale_rotational` parameters (`speed_units` restores the old
+  behaviour), and drops commands older than `twist_max_age` (default 0.25 s).
+
+### Changed
+- Gripper toggle conventions now match the lab's ROS teleop bridge: GN01
+  widths 0.09 m open / 0.01 m close (was 0.08 / 0.0). The initial open/closed
+  state is inferred from the robot's reported gripper width on first use
+  (fallback: closed, so the first press opens); override with `initial_open`.
+- The gripper button is no longer deadman-gated in `run()`: a rising edge with
+  the deadman released actuates the gripper with zero motion (previously the
+  edge was consumed and the internal state flipped while the command was
+  dropped, desynchronizing state from the physical gripper).
+- The ROS bridge integrates twists over the actual inter-message interval
+  (capped at `twist_max_age`) instead of a fixed `robot.dt`, so the realized
+  speed no longer scales with the publisher's rate; jog parameters are
+  validated before the robot is connected.
+- `SpaceMouseTeleop` accepts `signs` (six +/-1 values) to calibrate device
+  axes to the robot frame without a custom source subclass.
+
+### Housekeeping
+- Versions 0.1.6-0.1.8 were lab-internal iterations installed on the control
+  PC without changelog entries or tags; their changes are folded into this
+  release.
+
 ## [0.1.5] - 2026-06-19
 
 ### Fixed: 3 more flexiv_rdk-backend bugs from the first real-hardware session

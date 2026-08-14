@@ -112,30 +112,128 @@ class JointTrajectoryInterpolator:
         start_q: np.ndarray,
         control_hz: float,
         *,
-        max_joint_speed: Optional[float] = None,
+        max_joint_speed: Optional[np.ndarray | float] = None,
     ):
         self.traj = traj
         self.hz = float(control_hz)
         self.dt = 1.0 / self.hz
-        self.start_q = np.asarray(start_q, float)
-        self.max_joint_speed = max_joint_speed
+        self.start_q = np.asarray(start_q, float).reshape(-1).copy()
+        self.max_joint_speed: Optional[np.ndarray]
+        if max_joint_speed is None:
+            self.max_joint_speed = None
+        else:
+            speed = np.asarray(max_joint_speed, dtype=float)
+            if speed.ndim == 0:
+                speed = np.full(self.start_q.shape, float(speed))
+            else:
+                speed = speed.reshape(-1)
+            if speed.shape != self.start_q.shape:
+                raise ValueError(
+                    "max_joint_speed must be scalar or match start_q shape "
+                    f"{self.start_q.shape}, got {speed.shape}"
+                )
+            if not np.all(np.isfinite(speed)) or np.any(speed <= 0.0):
+                raise ValueError("max_joint_speed values must be finite and > 0")
+            self.max_joint_speed = speed
+
+        cumulative_requested_ticks = 0.0
+        cumulative_scheduled_ticks = 0
+        self.requested_duration_s = 0.0
+        self.requested_segment_ticks: list[int] = []
+        for wp in self.traj.waypoints:
+            duration_s = float(wp.resolve_duration(self.hz))
+            if not np.isfinite(duration_s) or duration_s <= 0.0:
+                raise ValueError("JointWaypoint duration must be finite and > 0")
+            self.requested_duration_s += duration_s
+            cumulative_requested_ticks += duration_s * self.hz
+            boundary = max(
+                cumulative_scheduled_ticks + 1,
+                int(np.floor(cumulative_requested_ticks + 0.5)),
+            )
+            self.requested_segment_ticks.append(boundary - cumulative_scheduled_ticks)
+            cumulative_scheduled_ticks = boundary
+        self.requested_total_ticks = cumulative_scheduled_ticks
+        # Backward-compatible names used by callers/tests.
+        self.nominal_segment_ticks = list(self.requested_segment_ticks)
+        self.nominal_total_ticks = self.requested_total_ticks
+
+        peak_factor = 1.0 if traj.interpolation == "linear" else _BLEND_PEAK
+        self.scheduled_segment_ticks: list[int] = []
+        prev = self.start_q
+        for segment_index, (wp, requested_n) in enumerate(
+            zip(self.traj.waypoints, self.requested_segment_ticks)
+        ):
+            tgt = wp.positions
+            if tgt.shape != self.start_q.shape:
+                raise ValueError(
+                    f"JointWaypoint {segment_index} positions must match "
+                    f"start_q shape {self.start_q.shape}, got {tgt.shape}"
+                )
+            n = int(requested_n)
+            if self.max_joint_speed is not None:
+                dq = np.abs(tgt - prev)
+                required = peak_factor * dq / (n * self.dt)
+                too_fast = required > self.max_joint_speed + 1e-12
+                if traj.strict_timing and np.any(too_fast):
+                    joint = int(np.flatnonzero(too_fast)[0])
+                    raise ValueError(
+                        "strict_timing joint rate exceeds effective runtime "
+                        f"limit at segment {segment_index}, joint {joint}: "
+                        f"required {required[joint]:.9g} rad/s > "
+                        f"{self.max_joint_speed[joint]:.9g} rad/s; "
+                        f"requested n_frames={n} is authoritative"
+                    )
+                if not traj.strict_timing:
+                    n = max(
+                        n,
+                        int(np.max(np.ceil(peak_factor * dq / (self.max_joint_speed * self.dt)))),
+                    )
+            self.scheduled_segment_ticks.append(max(1, n))
+            prev = tgt
+        self.scheduled_total_ticks = int(sum(self.scheduled_segment_ticks))
+        self.current_segment = 0
+        self.current_segment_tick = 0
 
     def __iter__(self) -> Iterator[np.ndarray]:
         prev = self.start_q.copy()
-        for wp in self.traj.waypoints:
+        for segment_index, (wp, n) in enumerate(
+            zip(self.traj.waypoints, self.scheduled_segment_ticks)
+        ):
+            self.current_segment = segment_index
             tgt = wp.positions
-            n = max(1, int(round(wp.resolve_duration(self.hz) * self.hz)))
-            if self.max_joint_speed and self.max_joint_speed > 0:
-                dq = float(np.max(np.abs(tgt - prev)))
-                n = max(n, int(np.ceil(_BLEND_PEAK * dq / (self.max_joint_speed * self.dt))))
-            n = max(1, n)
             for k in range(1, n + 1):
-                s = _cosine_blend(k / n)
+                self.current_segment_tick = k
+                phase = k / n
+                s = phase if self.traj.interpolation == "linear" else _cosine_blend(phase)
                 yield prev + s * (tgt - prev)
             prev = tgt.copy()
 
     def setpoints(self) -> List[np.ndarray]:
         return list(iter(self))
+
+
+class JointTorqueTrajectoryInterpolator:
+    """Linear interpolation of direct torque endpoints at controller rate."""
+
+    def __init__(self, traj, control_hz: float):
+        del control_hz  # n_frames is authoritative by contract.
+        self.traj = traj
+        self.current_segment = 0
+        self.current_segment_tick = 0
+        self.scheduled_total_ticks = int(
+            sum(waypoint.n_frames for waypoint in traj.waypoints)
+        )
+
+    def __iter__(self):
+        previous = self.traj.initial_torques.copy()
+        for segment, waypoint in enumerate(self.traj.waypoints):
+            self.current_segment = segment
+            for tick in range(1, waypoint.n_frames + 1):
+                self.current_segment_tick = tick
+                yield previous + (tick / waypoint.n_frames) * (
+                    waypoint.torques - previous
+                )
+            previous = waypoint.torques.copy()
 
 
 def delta_to_target_pose(delta: CartesianDelta, current_pose: np.ndarray) -> np.ndarray:

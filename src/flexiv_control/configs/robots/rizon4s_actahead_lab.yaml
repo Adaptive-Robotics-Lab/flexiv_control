@@ -7,7 +7,9 @@ robot_sn: "Rizon4s-062626"
 # GN01 gripper: the device name Flexiv Elements -> Settings -> Device reports for it.
 gripper_name: "Flexiv-GN01"
 n_joints: 7
-control_hz: 100.0
+# Flexiv RT_JOINT_TORQUE consumes a smooth command every 1 ms.
+control_hz: 1000.0
+allow_joint_torque: true
 default_safety_profile: actahead_lab
 # Restore/initial pose used in the lab. Source of truth: ActAhead
 # config/lab_home_posture.json (read-only RDK probe of the real arm); the

@@ -24,7 +24,7 @@ Quick start (no hardware needed)::
 
 from __future__ import annotations
 
-__version__ = "0.1.8"
+__version__ = "0.4.0.dev0"
 
 # --- core data types
 from .types import (  # noqa: F401
@@ -45,8 +45,12 @@ from .trajectory import (  # noqa: F401
     CartesianWaypoint,
     TrajectoryRepresentation,
     ExecutionResult,
+    JointGripperForceTarget,
+    JointGripperTarget,
     JointTrajectory,
     JointWaypoint,
+    JointTorqueTrajectory,
+    JointTorqueWaypoint,
 )
 
 # --- safety + config
@@ -80,8 +84,12 @@ __all__ = [
     "CartesianWaypoint",
     "TrajectoryRepresentation",
     "ExecutionResult",
+    "JointGripperForceTarget",
+    "JointGripperTarget",
     "JointTrajectory",
     "JointWaypoint",
+    "JointTorqueTrajectory",
+    "JointTorqueWaypoint",
     # safety + config
     "SafetyFilter",
     "SafetyProfile",

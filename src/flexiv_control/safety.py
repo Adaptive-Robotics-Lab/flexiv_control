@@ -50,6 +50,7 @@ class SafetyProfile:
     # Joint limits (margin shrinks the hard limits; speed scale caps velocity).
     joint_margin_rad: float = 0.08
     max_joint_speed_scale: float = 0.30
+    max_joint_torque_scale: float = 0.30
     # Hard joint position limits (Rizon 4/4s nominal; override per robot).
     joint_lower: np.ndarray = field(
         default_factory=lambda: np.array(
@@ -114,6 +115,9 @@ class SafetyProfile:
         jl = d.get("joint_limits", {})
         p.joint_margin_rad = jl.get("margin_rad", p.joint_margin_rad)
         p.max_joint_speed_scale = jl.get("max_joint_speed_scale", p.max_joint_speed_scale)
+        p.max_joint_torque_scale = jl.get(
+            "max_joint_torque_scale", p.max_joint_torque_scale
+        )
         if "lower" in jl:
             p.joint_lower = np.asarray(jl["lower"], float)
         if "upper" in jl:
@@ -153,6 +157,7 @@ class SafetyProfile:
             "joint_limits": {
                 "margin_rad": self.joint_margin_rad,
                 "max_joint_speed_scale": self.max_joint_speed_scale,
+                "max_joint_torque_scale": self.max_joint_torque_scale,
                 "lower": self.joint_lower.tolist(),
                 "upper": self.joint_upper.tolist(),
             },
@@ -259,9 +264,17 @@ class SafetyFilter:
     used as the reference, which keeps the guard meaningful in unit tests.
     """
 
-    def __init__(self, profile: SafetyProfile, control_dt: float):
+    def __init__(
+        self,
+        profile: SafetyProfile,
+        control_dt: float,
+        *,
+        joint_velocity_max: Optional[np.ndarray] = None,
+    ):
         self.p = profile
         self.dt = control_dt
+        self._joint_velocity_max: Optional[np.ndarray] = None
+        self.set_joint_velocity_limits(joint_velocity_max)
         self._prev_pose: Optional[np.ndarray] = None
         self._prev_q: Optional[np.ndarray] = None
         self._prev_lin_vel: Optional[np.ndarray] = None  # for the accel cap
@@ -291,6 +304,26 @@ class SafetyFilter:
 
     def set_profile(self, profile: SafetyProfile) -> None:
         self.p = profile
+
+    def set_joint_velocity_limits(
+        self,
+        limits: Optional[np.ndarray],
+    ) -> None:
+        """Set runtime per-joint manufacturer/firmware velocity ceilings."""
+        if limits is None:
+            self._joint_velocity_max = None
+            return
+        values = np.asarray(limits, dtype=float).reshape(-1)
+        if (
+            values.shape != self.p.joint_lower.shape
+            or not np.all(np.isfinite(values))
+            or np.any(values <= 0.0)
+        ):
+            raise ValueError(
+                "joint_velocity_max must match joint limits and contain "
+                "finite positive values"
+            )
+        self._joint_velocity_max = values.copy()
 
     # -- Cartesian -----------------------------------------------------------
     def filter_cartesian(
@@ -412,7 +445,12 @@ class SafetyFilter:
         # Per-tick step limit from a coarse joint-speed cap (rad/s), referenced
         # to the previous joint command (see filter_cartesian for rationale).
         ref_q = self._prev_q if self._prev_q is not None else cur_q
-        max_step = 2.0 * p.max_joint_speed_scale * self.dt
+        base_velocity = (
+            self._joint_velocity_max
+            if self._joint_velocity_max is not None
+            else np.full(target_q.shape, 2.0, dtype=float)
+        )
+        max_step = base_velocity * p.max_joint_speed_scale * self.dt
         step = target_q - ref_q
         big = np.abs(step) > max_step
         if np.any(big):

@@ -82,6 +82,7 @@ class StopReason(str, Enum):
     STALE_STATE = "stale_state"
     WORKSPACE = "workspace_limit"
     JOINT_LIMIT = "joint_limit"
+    GRIPPER_LIMIT = "gripper_limit"
     TCP_SPEED = "tcp_speed_limit"
     POSE_JUMP = "pose_jump_limit"
     CONTACT_WRENCH = "contact_wrench"

@@ -68,6 +68,7 @@ class FakeBackend(RobotBackend):
         # Recorded command log (for tests / debugging).
         self.cartesian_log: List[np.ndarray] = []
         self.joint_log: List[np.ndarray] = []
+        self.joint_torque_log: List[np.ndarray] = []
         self.gripper_log: List[GripperCommand] = []
         self.mode_log: List[ControlMode] = []
 
@@ -150,6 +151,14 @@ class FakeBackend(RobotBackend):
         self.joint_log.append(q.copy())
         a = self._alpha
         self._q = (1 - a) * self._q + a * q
+
+    def stream_joint_torque(self, tau: np.ndarray) -> None:
+        if self._mode != ControlMode.RT_JOINT_TORQUE:
+            raise RuntimeError(
+                "stream_joint_torque requires RT_JOINT_TORQUE mode"
+            )
+        command = np.asarray(tau, dtype=float).reshape(self.n_joints)
+        self.joint_torque_log.append(command.copy())
 
     def set_contact_wrench_limit(self, wrench: np.ndarray) -> None:
         # Mirror the firmware guard so tests can assert apply/restore.

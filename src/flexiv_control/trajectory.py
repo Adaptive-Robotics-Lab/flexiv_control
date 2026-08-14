@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import numpy as np
 
@@ -60,10 +60,10 @@ class CartesianWaypoint:
     """
 
     position: np.ndarray
-    quaternion: Optional[np.ndarray] = None   # (w, x, y, z); None -> hold
+    quaternion: Optional[np.ndarray] = None  # (w, x, y, z); None -> hold
     gripper: Optional[GripperCommand] = None  # None -> hold gripper
-    n_frames: Optional[int] = None            # number of low-level control frames
-    duration: Optional[float] = None          # seconds (alternative to n_frames)
+    n_frames: Optional[int] = None  # number of low-level control frames
+    duration: Optional[float] = None  # seconds (alternative to n_frames)
     frame: str = "base"
 
     def __post_init__(self) -> None:
@@ -122,12 +122,12 @@ class CartesianTrajectory:
     # Kinematic SPEED envelope. Enforced as TIGHTENING-ONLY at execution: the
     # interpolator runs at min(traj cap, active profile cap), so a traj may
     # slow itself below the profile but can never relax the profile's limits.
-    max_tcp_linear_speed: float = 0.25    # m/s
-    max_tcp_angular_speed: float = 0.60   # rad/s
+    max_tcp_linear_speed: float = 0.25  # m/s
+    max_tcp_angular_speed: float = 0.60  # rad/s
     # Acceleration fields are ADVISORY metadata only (logged, not enforced);
     # the profile's opt-in per-tick accel cap (max_linear_accel) is what binds.
-    max_tcp_linear_acc: float = 1.0       # m/s^2
-    max_tcp_angular_acc: float = 2.0      # rad/s^2
+    max_tcp_linear_acc: float = 1.0  # m/s^2
+    max_tcp_angular_acc: float = 2.0  # rad/s^2
 
     # Contact envelope (None -> use the safety profile default). Like the speed
     # caps, applied as min(traj, profile) -- tightening only.
@@ -228,8 +228,12 @@ class CartesianTrajectory:
             )
             new_wps.append(
                 CartesianWaypoint(
-                    position=abs_pos, quaternion=abs_quat, gripper=w.gripper,
-                    n_frames=w.n_frames, duration=w.duration, frame=w.frame,
+                    position=abs_pos,
+                    quaternion=abs_quat,
+                    gripper=w.gripper,
+                    n_frames=w.n_frames,
+                    duration=w.duration,
+                    frame=w.frame,
                 )
             )
         return replace(self, waypoints=new_wps, representation=TrajectoryRepresentation.ABSOLUTE)
@@ -413,9 +417,9 @@ class CartesianDelta:
     The translation is taken in ``frame`` ("base" or "tcp").
     """
 
-    delta: np.ndarray                       # length-6, base or tcp frame
+    delta: np.ndarray  # length-6, base or tcp frame
     gripper: Optional[GripperCommand] = None
-    duration: float = 0.05                  # 20 Hz default control step
+    duration: float = 0.05  # 20 Hz default control step
     frame: str = "base"
 
     def __post_init__(self) -> None:
@@ -426,15 +430,107 @@ class CartesianDelta:
 # Joint space (reset / home / MoveIt-plan execution)
 # ----------------------------------------------------------------------------
 @dataclass
+class JointGripperTarget:
+    """Exact gripper target synchronized with a joint segment.
+
+    ``velocity=None`` derives the velocity needed to cover the width delta in
+    the segment's scheduled ticks. A supplied velocity asserts the same timing
+    contract. This contract uses fire-and-forget ``Gripper.Move`` only.
+    """
+
+    width: float
+    force: float = 20.0
+    velocity: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        self.width = float(self.width)
+        self.force = float(self.force)
+        if not np.isfinite(self.width):
+            raise ValueError("JointGripperTarget.width must be finite")
+        if not np.isfinite(self.force):
+            raise ValueError("JointGripperTarget.force must be finite")
+        if self.velocity is not None:
+            self.velocity = float(self.velocity)
+            if not np.isfinite(self.velocity) or self.velocity <= 0.0:
+                raise ValueError("JointGripperTarget.velocity must be finite and > 0")
+
+
+@dataclass
+class JointGripperForceTarget:
+    """Signed native gripper-force target synchronized with a joint segment.
+
+    The backend dispatches ``Gripper.Grasp(force)``. Positive force closes and
+    negative force opens, exactly matching Flexiv RDK. No desired width is part
+    of this action; measured width remains observable robot state.
+    """
+
+    force: float
+
+    def __post_init__(self) -> None:
+        self.force = float(self.force)
+        if not np.isfinite(self.force):
+            raise ValueError("JointGripperForceTarget.force must be finite")
+
+    @classmethod
+    def from_signed_effort_latent(
+        cls,
+        latent: float,
+        *,
+        force_limit: float,
+    ) -> "JointGripperForceTarget":
+        """Decode one planner latent into a physical signed-force target.
+
+        The semantic coordinate is dimensionless and bounded by ``[-1, 1]``:
+        positive closes, negative opens, and zero requests zero force. Only
+        the decoded Newton value is retained by this object or sent over the
+        trajectory RPC. This is deliberately *not* the legacy positional
+        :meth:`GripperCommand.from_signed_action` convention, whose positive
+        endpoint means open.
+
+        ``force_limit`` is explicit rather than a library constant because the
+        connected gripper's runtime limits remain authoritative.
+        """
+        value = float(latent)
+        limit = float(force_limit)
+        if not np.isfinite(value) or not -1.0 <= value <= 1.0:
+            raise ValueError("signed effort latent must be finite and in [-1, 1]")
+        if not np.isfinite(limit) or limit <= 0.0:
+            raise ValueError("force_limit must be finite and > 0")
+        return cls(force=value * limit)
+
+
+@dataclass
 class JointWaypoint:
     positions: np.ndarray
     n_frames: Optional[int] = None
     duration: Optional[float] = None
+    gripper: Optional[
+        Union[JointGripperTarget, JointGripperForceTarget, GripperCommand]
+    ] = None
 
     def __post_init__(self) -> None:
-        self.positions = np.asarray(self.positions, float)
+        self.positions = np.asarray(self.positions, float).reshape(-1)
+        if not np.all(np.isfinite(self.positions)):
+            raise ValueError("JointWaypoint.positions must be finite")
         if self.n_frames is None and self.duration is None:
             raise ValueError("JointWaypoint needs n_frames or duration")
+        if self.n_frames is not None:
+            if isinstance(self.n_frames, (bool, np.bool_)) or int(self.n_frames) != self.n_frames:
+                raise ValueError("JointWaypoint.n_frames must be an integer")
+            self.n_frames = int(self.n_frames)
+            if self.n_frames <= 0:
+                raise ValueError("JointWaypoint.n_frames must be positive")
+        if self.gripper is not None and isinstance(self.gripper, GripperCommand):
+            if self.gripper.grasp:
+                raise ValueError(
+                    "JointWaypoint requires an exact Gripper.Move target; "
+                    "grasp=True has no exact width"
+                )
+            self.gripper = JointGripperTarget(
+                width=self.gripper.width,
+                force=self.gripper.force,
+                velocity=self.gripper.velocity,
+            )
 
     def resolve_duration(self, control_hz: float) -> float:
         if self.duration is not None:
@@ -445,14 +541,116 @@ class JointWaypoint:
 @dataclass
 class JointTrajectory:
     waypoints: List[JointWaypoint]
-    max_joint_speed_scale: float = 0.3   # fraction of joint vel limits
-    # Same semantics as CartesianTrajectory.safety_profile: "" = use the active
-    # profile; a non-empty name must match the active profile or execution raises.
+    # Preserve the legacy positional field order; v0.2.3 fields are appended.
+    max_joint_speed_scale: float = 0.3
+    interpolation: str = "cosine"
     safety_profile: str = ""
+    # Actuator-target knot 0 is intentionally distinct from measured state.
+    initial_positions: Optional[np.ndarray] = None
+    initial_gripper_width: Optional[float] = None
+    # Authoritative n_frames: reject rate violations, never time-stretch.
+    strict_timing: bool = False
 
     def __post_init__(self) -> None:
         if not self.waypoints:
             raise ValueError("JointTrajectory needs at least one waypoint")
+        if self.initial_positions is not None:
+            self.initial_positions = np.asarray(self.initial_positions, float).reshape(-1)
+            if not np.all(np.isfinite(self.initial_positions)):
+                raise ValueError("initial_positions must be finite")
+        if self.initial_gripper_width is not None:
+            self.initial_gripper_width = float(self.initial_gripper_width)
+            if not np.isfinite(self.initial_gripper_width):
+                raise ValueError("initial_gripper_width must be finite")
+        self.max_joint_speed_scale = float(self.max_joint_speed_scale)
+        if (
+            not np.isfinite(self.max_joint_speed_scale)
+            or not 0.0 < self.max_joint_speed_scale <= 1.0
+        ):
+            raise ValueError("max_joint_speed_scale must be finite and in (0, 1]")
+        if self.interpolation not in {"cosine", "linear"}:
+            raise ValueError("JointTrajectory.interpolation must be 'cosine' or 'linear'")
+        self.strict_timing = bool(self.strict_timing)
+        if self.strict_timing:
+            if self.initial_positions is None:
+                raise ValueError("strict_timing requires explicit initial_positions")
+            for wp in self.waypoints:
+                if wp.n_frames is None or wp.duration is not None:
+                    raise ValueError(
+                        "strict_timing requires n_frames (and no duration) on every JointWaypoint"
+                    )
+            if (
+                any(isinstance(wp.gripper, JointGripperTarget) for wp in self.waypoints)
+                and self.initial_gripper_width is None
+            ):
+                raise ValueError("strict_timing gripper waypoints require initial_gripper_width")
+
+
+@dataclass
+class JointTorqueWaypoint:
+    """One smooth arm-torque endpoint and its exact controller duration."""
+
+    torques: np.ndarray
+    n_frames: int
+    gripper: Optional[
+        Union[JointGripperTarget, JointGripperForceTarget, GripperCommand]
+    ] = None
+
+    def __post_init__(self) -> None:
+        self.torques = np.asarray(self.torques, dtype=float).reshape(-1)
+        if not np.all(np.isfinite(self.torques)):
+            raise ValueError("JointTorqueWaypoint.torques must be finite")
+        if isinstance(self.n_frames, (bool, np.bool_)):
+            raise ValueError("JointTorqueWaypoint.n_frames must be an integer")
+        self.n_frames = int(self.n_frames)
+        if self.n_frames <= 0:
+            raise ValueError("JointTorqueWaypoint.n_frames must be positive")
+        if isinstance(self.gripper, GripperCommand):
+            if self.gripper.grasp:
+                self.gripper = JointGripperForceTarget(
+                    force=self.gripper.force
+                )
+            else:
+                self.gripper = JointGripperTarget(
+                    width=self.gripper.width,
+                    force=self.gripper.force,
+                    velocity=self.gripper.velocity,
+                )
+
+
+@dataclass
+class JointTorqueTrajectory:
+    """Gravity-compensated arm torque plus synchronized gripper effort.
+
+    ``initial_torques`` is the command immediately before the first emitted
+    tick. Every segment linearly approaches its endpoint, satisfying Flexiv's
+    requirement that streamed torque commands remain smooth and continuous.
+    """
+
+    waypoints: List[JointTorqueWaypoint]
+    initial_torques: np.ndarray
+    max_joint_torque_scale: float = 0.30
+    safety_profile: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.waypoints:
+            raise ValueError("JointTorqueTrajectory needs at least one waypoint")
+        self.initial_torques = np.asarray(
+            self.initial_torques, dtype=float
+        ).reshape(-1)
+        if not np.all(np.isfinite(self.initial_torques)):
+            raise ValueError("initial_torques must be finite")
+        if any(
+            waypoint.torques.shape != self.initial_torques.shape
+            for waypoint in self.waypoints
+        ):
+            raise ValueError("all torque waypoints must match initial_torques")
+        self.max_joint_torque_scale = float(self.max_joint_torque_scale)
+        if (
+            not np.isfinite(self.max_joint_torque_scale)
+            or not 0.0 < self.max_joint_torque_scale <= 1.0
+        ):
+            raise ValueError("max_joint_torque_scale must be in (0, 1]")
 
 
 # ----------------------------------------------------------------------------
@@ -473,7 +671,7 @@ class ExecutionResult:
     clipped: bool = False
     stop_reason: str = "none"
     executed_duration: float = 0.0
-    path_tracking_error: float = 0.0      # max ||pose_cmd - pose_meas|| over run
+    path_tracking_error: float = 0.0  # max ||pose_cmd - pose_meas|| over run
     max_tcp_speed: float = 0.0
     max_joint_speed: float = 0.0
     max_wrench: float = 0.0

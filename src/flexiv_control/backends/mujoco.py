@@ -197,6 +197,19 @@ class MujocoBackend(RobotBackend):
         d.ctrl[self._act] = q
         self._step_n(self._substeps())
 
+    def stream_joint_torque(self, tau: np.ndarray) -> None:
+        if self._mode != ControlMode.RT_JOINT_TORQUE:
+            raise RuntimeError(
+                "stream_joint_torque requires RT_JOINT_TORQUE mode"
+            )
+        m, d = self._m, self._d
+        command = np.asarray(tau, dtype=float).reshape(self.n_joints)
+        lo = m.actuator_ctrlrange[self._act, 0]
+        hi = m.actuator_ctrlrange[self._act, 1]
+        command = np.where(hi > lo, np.clip(command, lo, hi), command)
+        d.ctrl[self._act] = command
+        self._step_n(self._substeps())
+
     def stream_cartesian(self, pose: np.ndarray, wrench: Optional[np.ndarray] = None) -> None:
         mj, m, d = self._mj, self._m, self._d
         pose = np.asarray(pose, float).reshape(7)

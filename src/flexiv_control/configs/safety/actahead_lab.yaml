@@ -31,6 +31,8 @@ tcp_limits:
 joint_limits:
   margin_rad: 0.08
   max_joint_speed_scale: 0.30
+  # Fraction of the connected robot's RobotInfo.tau_max available to MPC.
+  max_joint_torque_scale: 0.30
 
 contact:
   max_wrench: [40, 40, 40, 5, 5, 5]

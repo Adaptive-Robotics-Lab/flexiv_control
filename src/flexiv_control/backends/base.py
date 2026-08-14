@@ -37,6 +37,16 @@ from ..types import (
 class RobotBackend(abc.ABC):
     n_joints: int = 7
 
+    def runtime_info(self) -> dict:
+        """Return immutable facts cached from the connected backend.
+
+        The control server exposes this snapshot without touching hardware on
+        each identity request.  Backends that cannot provide hardware identity
+        return an empty mapping; hardware backends should fail during connect
+        rather than fabricate required fields.
+        """
+        return {}
+
     # -- lifecycle ----------------------------------------------------------
     @abc.abstractmethod
     def connect(self) -> None: ...
@@ -73,6 +83,11 @@ class RobotBackend(abc.ABC):
 
     @abc.abstractmethod
     def stream_joint(self, q: np.ndarray) -> None: ...
+
+    @abc.abstractmethod
+    def stream_joint_torque(self, tau: np.ndarray) -> None:
+        """Stream one gravity-compensated joint-torque command in Nm."""
+        ...
 
     # -- gripper ------------------------------------------------------------
     @abc.abstractmethod

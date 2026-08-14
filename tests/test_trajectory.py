@@ -1,7 +1,14 @@
 import numpy as np
 import pytest
 
-from flexiv_control import CartesianTrajectory, CartesianDelta, CartesianWaypoint, ExecutionResult
+from flexiv_control import (
+    CartesianDelta,
+    CartesianTrajectory,
+    CartesianWaypoint,
+    ExecutionResult,
+    JointTrajectory,
+    JointWaypoint,
+)
 
 
 def test_waypoint_requires_duration_or_frames():
@@ -57,3 +64,34 @@ def test_cartesian_delta_shape():
 def test_execution_result_defaults():
     r = ExecutionResult()
     assert r.success and not r.clipped and r.stop_reason == "none"
+
+
+@pytest.mark.parametrize("scale", [0.0, -0.1, 1.1, np.nan, np.inf])
+def test_joint_trajectory_rejects_invalid_speed_scale(scale):
+    with pytest.raises(ValueError, match="max_joint_speed_scale"):
+        JointTrajectory(
+            waypoints=[JointWaypoint(np.zeros(7), duration=0.1)],
+            max_joint_speed_scale=scale,
+        )
+
+
+def test_joint_trajectory_rejects_unknown_interpolation():
+    with pytest.raises(ValueError, match="interpolation"):
+        JointTrajectory(
+            waypoints=[JointWaypoint(np.zeros(7), duration=0.1)],
+            interpolation="cubic",
+        )
+
+
+def test_joint_trajectory_preserves_legacy_positional_field_order():
+    traj = JointTrajectory(
+        [JointWaypoint(np.zeros(7), duration=0.1)],
+        0.2,
+        "linear",
+        "tabletop_safe",
+    )
+    assert traj.max_joint_speed_scale == pytest.approx(0.2)
+    assert traj.interpolation == "linear"
+    assert traj.safety_profile == "tabletop_safe"
+    assert traj.initial_positions is None
+    assert traj.strict_timing is False

@@ -79,3 +79,8 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py38"
+
+[tool.ruff.lint]
+# Pin the repository's historical Ruff default instead of inheriting changes
+# to the tool's default rule set across releases.
+select = ["E4", "E7", "E9", "F"]

@@ -99,6 +99,75 @@ with RemoteRobot("ROBOT_HOST_IP", 8766, owner="mpc") as r:
 `RemoteRobot` mirrors the `Robot` API over newline-JSON/TCP, holds the lease with
 a heartbeat, and installs with only numpy.
 
+## Strict receding-horizon joint prefixes
+
+For physics-sampling MPC whose action is generalized effort, use
+`JointTorqueTrajectory` instead of the position-target example below. It streams
+seven additional joint torques at 1 kHz with RDK nonlinear-dynamics compensation
+and firmware soft limits enabled, and dispatches an optional
+`JointGripperForceTarget` at the same segment boundaries. This API is disabled by
+default and is admitted only when the deployment, live `RobotInfo.tau_max`,
+safety profile, continuity anchor, and gripper force limits all agree. See
+[`joint_torque_mpc.md`](joint_torque_mpc.md).
+
+Use one atomic `execute_joint_trajectory` call for a multi-segment actuator
+prefix. Knot 0 is the previous commanded target, not a fresh measured-state
+sample; normal physical tracking lag therefore does not bend the next spline.
+
+```python
+import numpy as np
+from flexiv_control import JointGripperTarget, JointTrajectory, JointWaypoint
+
+knot0 = np.asarray(previous_ack_target, float)  # [q0..q6, gripper_width]
+knots = np.asarray(prefix_targets, float)       # shape (N, 8)
+frames = [32, 1]
+
+traj = JointTrajectory(
+    initial_positions=knot0[:7],
+    initial_gripper_width=float(knot0[7]),
+    waypoints=[
+        JointWaypoint(
+            positions=knot[:7],
+            gripper=JointGripperTarget(
+                width=float(knot[7]),
+                force=20.0,
+                velocity=None,  # derive abs(delta_width) / segment duration
+            ),
+            n_frames=n_frames,
+        )
+        for knot, n_frames in zip(knots, frames)
+    ],
+    interpolation="linear",
+    strict_timing=True,
+    max_joint_speed_scale=0.3,
+)
+result = robot.execute_joint_trajectory(traj)
+```
+
+Every strict segment is prevalidated against the effective runtime joint rates
+and cached `Gripper.params` before any backend write. Requested `n_frames` are
+authoritative: a violation raises instead of clipping or time-stretching. A
+provided gripper velocity must equal the velocity that realizes its width delta
+in the same segment; `None` derives it. Position-mode `Gripper.Move` is issued
+fire-and-forget at the segment boundary, then the arm streams concurrently.
+
+Knot 0 need not equal the prior commanded endpoint because it is not streamed.
+Every feedback-MPC call rebases its joint safety filter and first gripper ramp to
+current measured state. The actual first interpolated joint target must be
+reachable from that measurement in one controller tick under the effective
+per-joint rate limits; gripper velocity is likewise derived and validated from
+current measured width. This permits the next plan's knot 0 to reflect ordinary
+tracking error without hiding a command jump. The previous acknowledged joint
+and gripper targets remain in the result log as provenance, not an admission
+gate. The executor repeats the first-setpoint check on the freshest snapshot
+after any mode transition, immediately before actuator writes, and recomputes
+the first gripper-event ramp from width measured at dispatch. Stop, fault, lease
+changes, mode changes, and other mutating RPCs clear
+that provenance cache. A payload rejected completely during prevalidation
+leaves it intact for diagnosis. The result log also includes requested/scheduled
+segment and total ticks, interpolation and execution anchors, gripper events,
+and measured gripper tracking.
+
 ## Safety notes for MPC
 
 - Keep the safety filter on (it is, by default). A misbehaving solver that

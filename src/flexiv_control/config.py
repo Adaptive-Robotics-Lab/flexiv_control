@@ -101,6 +101,10 @@ class RobotConfig:
     gripper_name: Optional[str] = None
     n_joints: int = 7
     control_hz: float = 100.0
+    # Direct joint torque is an expert/research interface.  It is disabled by
+    # default and must be enabled by the robot deployment config before the
+    # facade can enter RT_JOINT_TORQUE or emit one torque command.
+    allow_joint_torque: bool = False
     default_safety_profile: str = "tabletop_safe"
     q_home: np.ndarray = field(
         default_factory=lambda: np.array([0.0, -0.7, 0.0, 1.6, 0.0, 0.9, 0.0], float)
@@ -132,6 +136,9 @@ class RobotConfig:
         c.gripper_name = d.get("gripper_name", c.gripper_name)
         c.n_joints = int(d.get("n_joints", c.n_joints))
         c.control_hz = float(d.get("control_hz", c.control_hz))
+        c.allow_joint_torque = bool(
+            d.get("allow_joint_torque", c.allow_joint_torque)
+        )
         c.default_safety_profile = d.get("default_safety_profile", c.default_safety_profile)
         if "q_home" in d:
             c.q_home = np.asarray(d["q_home"], float)
